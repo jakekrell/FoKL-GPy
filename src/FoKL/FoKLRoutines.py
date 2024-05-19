@@ -356,11 +356,11 @@ class FoKL:
                 np.random.shuffle(trainlog_i)  # randomize sort
             if len(trainlog_i) > l_log:
                 trainlog_i = trainlog_i[0:l_log]  # cut-off extra indices (beyond 'percent')
-            trainlog = np.zeros(n, dtype=np.bool)  # indices of training data (as a logical)
+            trainlog = np.zeros(n, dtype=bool)  # indices of training data (as a logical)
             for i in trainlog_i:
                 trainlog[i] = True
         else:
-            # trainlog = np.ones(n, dtype=np.bool)  # wastes memory, so use following method coupled with 'trainset':
+            # trainlog = np.ones(n, dtype=bool)  # wastes memory, so use following method coupled with 'trainset':
             trainlog = None  # means use all observations
         return trainlog
 
@@ -697,7 +697,7 @@ class FoKL:
 
         # Process keywords:
         default = {'normalize': None, 'draws': self.draws, 'clean': False, 'ReturnBounds': False}
-        default_for_clean = {'bit': 64, 'train': 1}
+        default_for_clean = {'bit': 64, 'train': 1, 'AutoTranspose': True}
         current = _process_kwargs(_merge_dicts(default, default_for_clean), kwargs)
         for boolean in ['clean', 'ReturnBounds']:
             current[boolean] = _str_to_bool(current[boolean])
@@ -1035,12 +1035,12 @@ class FoKL:
         Added Attributes:
             - Various ... please see description of 'clean()'
         """
-
+        
         # Check for unexpected keyword arguments:
         default_for_fit = {'ConsoleOutput': True}
         default_for_fit['ConsoleOutput'] = _str_to_bool(kwargs.get('ConsoleOutput', self.ConsoleOutput))
         default_for_fit['clean'] = _str_to_bool(kwargs.get('clean', False))
-        default_for_clean = {'bit': 64, 'train': 1}
+        default_for_clean = {'bit': 64, 'train': 1, 'AutoTranspose': True}
         expected = self.hypers + list(default_for_fit.keys()) + list(default_for_clean.keys())
         kwargs = _process_kwargs(expected, kwargs)
         if default_for_fit['clean'] is False:

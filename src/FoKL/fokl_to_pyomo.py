@@ -143,6 +143,9 @@ def fokl_to_pyomo(models, xvars, yvars, draws=None, m=None, xfix=None, yfix=None
     im = -1  # index of model, for indexing 'xvars' and 'yvars'
     for model in models:
         im += 1
+        igp = copy.copy(im)  # index of GP (which may be different than index of model, if pre-existing Pyomo model was passed with GP's already embedded)
+        while m.component(f"GP{igp}_scenarios") is not None:
+            igp += 1  # increase 'igp' until arrive at new GP (in case of 'fokl_to_pyomo' already called, and now calling again)
 
         # Convert FoKL to Pyomo:
 
@@ -157,31 +160,47 @@ def fokl_to_pyomo(models, xvars, yvars, draws=None, m=None, xfix=None, yfix=None
             basis_n += ni_ids[j]
         # n_ids = np.sort(np.unique(basis_n))  # orders of basis functions used (where 0 is B1), total (not used)
 
-        m.add_component(f"GP{im}_scenarios", pyo.Set(initialize=range(draws[im])))  # index for scenario (i.e., FoKL draw)
-        m.add_component(f"GP{im}_j", pyo.Set(initialize=range(lv)))  # index for FoKL input variable
+        m.add_component(f"GP{igp}_scenarios", pyo.Set(initialize=range(draws[im])))  # index for scenario (i.e., FoKL draw)
+        m.add_component(f"GP{igp}_j", pyo.Set(initialize=range(lv)))  # index for FoKL input variable
 
         # Define FoKL inputs and output:
 
         if m.find_component(yvars[im]) is None:  # then define; else a previous model already defined this variable
-            m.add_component(yvars[im], pyo.Var(m.component(f"GP{im}_scenarios"), within=pyo.Reals))  # FoKL output
+            m.add_component(yvars[im], pyo.Var(m.component(f"GP{igp}_scenarios"), within=pyo.Reals))  # FoKL output
         basis_nj = []
-        for j in m.component(f"GP{im}_j"):
+        for j in m.component(f"GP{igp}_j"):
             if m.find_component(xvars[im][j]) is None:  # then define; else a previous model already defined this variable
                 m.add_component(xvars[im][j], pyo.Var(within=pyo.Reals, bounds=[0, 1], initialize=0.0))  # FoKL input variables
                 if truescale[im][j] is True:  # create expression relating normalized variable to true scale
-                    m.add_component(xvars_true[im][j], pyo.Var(within=pyo.Reals, bounds=model.normalize[j], initialize=model.normalize[j][0]))
+                    if m.find_component(xvars_true[im][j]) is None:  # confirm truescale variable does not exist
+                        m.add_component(xvars_true[im][j], pyo.Var(within=pyo.Reals, bounds=model.normalize[j], initialize=model.normalize[j][0]))
+                    else:
+                        try:  # try adding more information about pre-existing variable, just in case variable exists but no information
+                            m.component(xvars_true[im][j])._domain = pyo.Reals  # within
+                            m.component(xvars_true[im][j]).setlb(model.normalize[j][0])  # bounds (lower), assuming pre-existing lower bound was not higher
+                            m.component(xvars_true[im][j]).setub(model.normalize[j][1])  # bounds (upper), assuming pre-existing upper bound was not lower
+                            m.component(xvars_true[im][j]).set_value(model.normalize[j][0])  # initialize
+                        except Exception as exception:
+                            pass  # no need to throw warning; variable probably already has information
 
                     # Add normalization constraint:
 
-                    if m.find_component(f"GP{im}_normalize") is None:  # reduce redundancy if repeat 'xvars' (may be extra constraint indices if some variables repeat but not others)
-                        m.add_component(f"GP{im}_normalize", pyo.Constraint(i_norm[im]))
+                    if m.find_component(f"GP{igp}_normalize") is None:  # reduce redundancy if repeat 'xvars' (may be extra constraint indices if some variables repeat but not others)
+                        m.add_component(f"GP{igp}_normalize", pyo.Constraint(i_norm[im]))
 
                     def symbolic_normalize(m):
                         """Relate normalized and true scale input variable."""
-                        m.component(f"GP{im}_normalize")[j] = m.component(xvars_true[im][j]) == m.component(xvars[im][j]) * (model.normalize[j][1] - model.normalize[j][0]) + model.normalize[j][0]
+                        m.component(f"GP{igp}_normalize")[j] = m.component(xvars_true[im][j]) == m.component(xvars[im][j]) * (model.normalize[j][1] - model.normalize[j][0]) + model.normalize[j][0]
                         return
 
                     symbolic_normalize(m)  # may be better to write as rule
+            else:  # previous model already defined this variable
+                if truescale[im][j] is True:  # check if either lower/upper bounds should be expanded for truescale variable
+                    if model.normalize[j][0] < m.component(xvars_true[im][j]).bounds[0]:  # if need to expand lower bound
+                        m.component(xvars_true[im][j]).setlb(model.normalize[j][0])
+                        m.component(xvars_true[im][j]).set_value(model.normalize[j][0])  # reset initialization to new lower bound
+                    if model.normalize[j][1] > m.component(xvars_true[im][j]).bounds[1]:  # if need to expand upper bound
+                        m.component(xvars_true[im][j]).setub(model.normalize[j][1])
 
             for n in ni_ids[j]:  # for order of basis function in unique orders, per current input variable 'm.~x[j]'
                 basis_nj.append([n, j])
@@ -191,57 +210,57 @@ def fokl_to_pyomo(models, xvars, yvars, draws=None, m=None, xfix=None, yfix=None
         def symbolic_basis(m):
             """Basis functions as symbolic. See 'evaluate_basis' for source of equation."""
             for [n, j] in basis_nj:
-                m.component(f"GP{im}_basis")[n, j] = model.phis[n][0] + sum(model.phis[n][k] * (m.component(xvars[im][j]) ** k)
+                m.component(f"GP{igp}_basis")[n, j] = model.phis[n][0] + sum(model.phis[n][k] * (m.component(xvars[im][j]) ** k)
                                                            for k in range(1, len(model.phis[n])))
             return
 
-        m.add_component(f"GP{im}_basis", pyo.Expression(basis_nj))  # create indices ONLY for used basis functions
+        m.add_component(f"GP{igp}_basis", pyo.Expression(basis_nj))  # create indices ONLY for used basis functions
         symbolic_basis(m)  # may be better to write as rule, but 'pyo.Expression(basis_nj, rule=symbolic_basis)' failed
 
-        m.add_component(f"GP{im}_k", pyo.Set(initialize=range(lt)))  # index for FoKL term (where 0 is beta0)
-        m.add_component(f"GP{im}_b", pyo.Var(m.component(f"GP{im}_scenarios"), m.component(f"GP{im}_k")))  # FoKL coefficients (i.e., betas)
-        for i in m.component(f"GP{im}_scenarios"):  # for scenario (i.e., draw) in scenarios (i.e., draws)
-            for k in m.component(f"GP{im}_k"):  # for term in terms
-                m.component(f"GP{im}_b")[i, k].fix(model.betas[-(i + 1), k])  # define values of betas, with y[0] as last FoKL draws
+        m.add_component(f"GP{igp}_k", pyo.Set(initialize=range(lt)))  # index for FoKL term (where 0 is beta0)
+        m.add_component(f"GP{igp}_b", pyo.Var(m.component(f"GP{igp}_scenarios"), m.component(f"GP{igp}_k")))  # FoKL coefficients (i.e., betas)
+        for i in m.component(f"GP{igp}_scenarios"):  # for scenario (i.e., draw) in scenarios (i.e., draws)
+            for k in m.component(f"GP{igp}_k"):  # for term in terms
+                m.component(f"GP{igp}_b")[i, k].fix(model.betas[-(i + 1), k])  # define values of betas, with y[0] as last FoKL draws
 
         def symbolic_fokl(m):
             """FoKL models (i.e., scenarios) as symbolic, assuming 'Bernoulli Polynomials."""
-            for i in m.component(f"GP{im}_scenarios"):  # for scenario (i.e., draw) in scenarios (i.e., draws)
-                m.component(f"GP{im}_expr")[i] = m.component(f"GP{im}_b")[i, 0]  # initialize with beta0
+            for i in m.component(f"GP{igp}_scenarios"):  # for scenario (i.e., draw) in scenarios (i.e., draws)
+                m.component(f"GP{igp}_expr")[i] = m.component(f"GP{igp}_b")[i, 0]  # initialize with beta0
                 for k in range(1, lt):  # for term in non-zeros terms (i.e., exclude beta0)
                     tk = t[k - 1, :]  # interaction matrix of current term
                     tk_mask = tk != -1  # ignore if -1 (recall -1 basis function means none)
                     if any(tk_mask):  # should always be true because FoKL 'fit' removes rows from 'mtx' without basis
-                        term_k = m.component(f"GP{im}_b")[i, k]
-                        for j in m.component(f"GP{im}_j"):  # for input variable in input variables
+                        term_k = m.component(f"GP{igp}_b")[i, k]
+                        for j in m.component(f"GP{igp}_j"):  # for input variable in input variables
                             if tk_mask[j]:  # for variable in term
-                                term_k *= m.component(f"GP{im}_basis")[tk[j], j]  # multiply basis function(s) with beta to form term
+                                term_k *= m.component(f"GP{igp}_basis")[tk[j], j]  # multiply basis function(s) with beta to form term
                     else:
                         term_k = 0
-                    m.component(f"GP{im}_expr")[i] += term_k  # add term to expression
+                    m.component(f"GP{igp}_expr")[i] += term_k  # add term to expression
             return
 
-        m.add_component(f"GP{im}_expr", pyo.Expression(m.component(f"GP{im}_scenarios")))  # FoKL models (i.e., scenarios, draws)
+        m.add_component(f"GP{igp}_expr", pyo.Expression(m.component(f"GP{igp}_scenarios")))  # FoKL models (i.e., scenarios, draws)
         symbolic_fokl(m)  # may be better to write as rule
 
         def symbolic_scenario(m):
             """Define each scenario, meaning a different draw of 'betas' for y=f(x), as a constraint."""
-            for i in m.component(f"GP{im}_scenarios"):
-                m.component(f"GP{im}_constr")[i] = m.component(yvars[im])[i] == m.component(f"GP{im}_expr")[i]
+            for i in m.component(f"GP{igp}_scenarios"):
+                m.component(f"GP{igp}_constr")[i] = m.component(yvars[im])[i] == m.component(f"GP{igp}_expr")[i]
             return
 
-        m.add_component(f"GP{im}_constr", pyo.Constraint(m.component(f"GP{im}_scenarios")))  # set of constraints, one per scenario
+        m.add_component(f"GP{igp}_constr", pyo.Constraint(m.component(f"GP{igp}_scenarios")))  # set of constraints, one per scenario
         symbolic_scenario(m)  # may be better to write as rule
 
         if xfix[im] is not None:
-            for j in m.component(f"GP{im}_j"):
+            for j in m.component(f"GP{igp}_j"):
                 if xfix[im][j] is not None:
                     if truescale[im][j] is True:
                         m.component(xvars_true[im][j]).fix(xfix[im][j])
                     else:
                         m.component(xvars[im][j]).fix(xfix[im][j])
         if yfix[im] is not None:
-            for i in m.component(f"GP{im}_scenarios"):
+            for i in m.component(f"GP{igp}_scenarios"):
                 m.component(yvars[im])[i].fix(yfix[im])
 
     # Return Pyomo model with all FoKL models embedded:
