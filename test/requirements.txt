@@ -1,7 +1,0 @@
-numpy
-pandas
-pytest
-scipy
-anyio
-matplotlib
-git+${CURRENT_REPO_URL}
