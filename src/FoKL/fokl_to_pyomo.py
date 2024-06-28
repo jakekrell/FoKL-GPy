@@ -343,7 +343,7 @@ def _add_gp(self, xvars, yvar, m, xfix, yfix, truescale, std, draws, igp):
     return m
 
 
-def fokl_to_pyomo(models, xvars, yvars, m=None, xfix=None, yfix=None, truescale=True, std=True, draws=None):
+def fokl_to_pyomo(models, xvars, yvars, m=None, xfix=None, yfix=None, truescale=True, std=True, draws=None, ode=False):
     """
     'to_pyomo' passes inputs to here;
     user may use this for multiple GP's at once (so symbolic bases get defined once, and so 'xvars' can be repeated);
@@ -353,6 +353,7 @@ def fokl_to_pyomo(models, xvars, yvars, m=None, xfix=None, yfix=None, truescale=
       careful to ensure repeat 'xvars' do not have differently intended 'truescale' values;
 
     std == boolean to include multiple draws, and thus a standard deviation calculation == True (default)
+    ode == boolean to index over a continuous set representing time in an ODE solver    == False (default)
     """
     # Process inputs:
     models, xvars, yvars, m, xfix, yfix, truescale, std, draws = _handle_exceptions(models, xvars, yvars, m, xfix, yfix, truescale, std, draws)
