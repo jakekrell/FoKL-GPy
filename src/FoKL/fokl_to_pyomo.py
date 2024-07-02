@@ -5,6 +5,45 @@ import copy
 from pyomo.environ import *
 
 
+# ==============================================================================================
+# ==============================================================================================
+# ==============================================================================================
+# [IN DEV]:
+
+def redefine_betas(m, betas, igp=0):
+    """
+    Redefine the beta coefficients of a FoKL GP model already embedded in a Pyomo model.
+
+    | Input | Type                | Description                                                |
+    |-------|---------------------|------------------------------------------------------------|
+    | m     | pyo.ConcreteModel() | Pyomo model containing FoKL GP model(s)                    |
+    | betas | ndarray [draws x k] | coefficients of GP model, with rows corresponding to draws |
+    | igp   | int                 | index of GP to redefine beta coefficients                  |
+    """
+    GPi_scenarios = f"GP{igp}_scenarios"
+    GPi_k = f"GP{igp}_k"
+    GPi_b = f"GP{igp}_b"
+    
+    # Check for errors/warnings:
+    if betas.shape[0] < len(m.component(GPi_scenarios)):
+        raise ValueError(f"'betas' must contain as many draws (rows) as GP{igp} was initialized with: {len(m.component(GPi_scenarios))} draws.")
+    if betas.shape[1] != len(m.component(GPi_k)):
+        raise ValueError(f"'betas' must contain as many terms (cols) as GP{igp} was initialized with: {len(m.component(GPi_k))} terms.")
+    if betas.shape[0] > len(m.component(GPi_scenarios)):
+        warnings.warn(f"'betas' contains more draws than GP{igp} was initialized with. Ignoring extra draws.", category=UserWarning)
+    
+    # Redefine betas:
+    for i in m.component(GPi_scenarios):  # for scenario (i.e., draw) in scenarios (i.e., draws)
+        for k in m.component(GPi_k):  # for term in terms
+            m.component(GPi_b)[i, k].fix(betas[-(i + 1), k])  # define values of betas, with i=0 as last FoKL draw
+
+    return m
+
+# [END DEV].
+# ==============================================================================================
+# ==============================================================================================
+# ==============================================================================================
+
 def _check_models(models):
     """Check 'models' is list of class object(s); return False if cannot be resolved."""
     if not isinstance(models, list):
@@ -283,21 +322,15 @@ def _add_gp(self, xvars, yvar, m, xfix, yfix, truescale, std, draws, igp):
         m.component(f"GP{igp}_{yvar}_mean") == m.component(f"GP{igp}_expr_")
     ))
 
-    # ---------------------------
-    # [IN DEV; Error evaluating constraint 1002: can't evaluate sqrt'(0).]:
-
-    # if std is True:
-    #     m.add_component(f"GP{igp}_constr_std", pyo.Constraint(expr=
-    #         m.component(f"GP{igp}_{yvar}_std") == sqrt(sum((m.component(f"GP{igp}_{yvar}_draw")[i] - m.component(f"GP{igp}_{yvar}_mean")) ** 2 for i in m.component(f"GP{igp}_scenarios")) / (draws - 1))
-    #     ))
+    if std is True:
+        m.add_component(f"GP{igp}_constr_std", pyo.Constraint(expr=
+            m.component(f"GP{igp}_{yvar}_std") == sqrt(1e-9 + sum((m.component(f"GP{igp}_{yvar}_draw")[i] - m.component(f"GP{igp}_{yvar}_mean")) ** 2 for i in m.component(f"GP{igp}_scenarios")) / (draws - 1))
+        ))
 
     if std is True:  # USE VARIANCE INSTEAD
         m.add_component(f"GP{igp}_constr_var", pyo.Constraint(expr=
             m.component(f"GP{igp}_{yvar}_var") == sum((m.component(f"GP{igp}_{yvar}_draw")[i] - m.component(f"GP{igp}_{yvar}_mean")) ** 2 for i in m.component(f"GP{igp}_scenarios")) / (draws - 1)
         ))
-
-    # [END DEV].
-    # --------------------------
 
     # Append constraint of 'yvar' equaling mean:
 
