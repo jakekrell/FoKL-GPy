@@ -101,10 +101,10 @@ except Exception as exception:
 
 # time grid
 t0 = 0
-tf = 1000
-dt = 2
+tf = 999
+dt = 1
 n = round(tf / dt)
-t_grid = np.linspace(t0, 1000, n + 1)
+t_grid = np.linspace(t0, tf, n + 1)
 
 # ambient temperature
 Tamb = 21.0
@@ -163,8 +163,11 @@ m.pprint()
 # OPTIMIZATION USING GP MODEL - SOLVER:
 
 # Apply a collocation method to numerically integrate the differential equations
-pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=200, wrt=m.t)
+pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=1000, wrt=m.t)
 
 # Call our nonlinear optimization/equation solver, Ipopt
-pyo.SolverFactory('ipopt').solve(m)
+# pyo.SolverFactory('ipopt').solve(m)
+pyo.SolverFactory('multistart').solve(m, solver='ipopt', suppress_unbounded_warning=True)  # also infeasible
+# also infeasible for GP trained on [Ts1, u1] only (no du1)
+# also infeasible for dt=1, nfe=1000
 
