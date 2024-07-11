@@ -36,15 +36,18 @@ def _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax):
     if isinstance(yvar, list):  # if list, make not list
         yvar = yvar[0]
 
+    if minmax is None:
+        minmax = self.minmax
+        
     j = -1
     for xvar in xvars:
         j += 1
         if isinstance(xvar, str):  # else pre-defined Pyomo component, so ignore
-            m.add_component(xvar, pyo.Var(m.t, initialize=0.0, domain=pyo.Reals))
+            m.add_component(xvar, pyo.Var(m.t, domain=pyo.Reals, bounds=minmax[j]))
             xvars[j] = m.component(xvar)
 
     if isinstance(yvar, str):  # else pre-defined Pyomo component, so ignore
-        m.add_component(yvar, pyo.Var(m.t, initialize=0.0, domain=pyo.Reals))
+        m.add_component(yvar, pyo.Var(m.t, domain=pyo.Reals))
         yvar = m.component(yvar)
 
     if draws is None:
@@ -56,13 +59,10 @@ def _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax):
     if betas is None:
         betas = self.betas
 
-    if minmax is None:
-        minmax = self.minmax
-
     return self, xvars, yvar, m, draws, t_span, mtx, betas, minmax
 
 
-def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
+def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax):
     """tvec == m.t"""
     # Initialize sub-model for GP:
     mGP = pyo.ConcreteModel(name)
@@ -81,8 +81,13 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
     mGP.beta_avg = pyo.Param(mGP.terms, mutable=True)
     fix_betas(mGP, betas)
 
-    # Define normalized attributes (i.e., input variables):
-    mGP.x = pyo.Var(tvec, mGP.attributes, bounds=(0, 1))
+    # Define expression of normalized attributes (i.e., input variables):
+    
+    def _eq_norm(mGP, t, j):
+        """Normalization constraint."""
+        return (xvars[j][t] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+
+    mGP.x = pyo.Expression(tvec, mGP.attributes, rule=_eq_norm)
 
     # ===================================================================
     # Define polynomials (i.e., "basis" functions):
@@ -214,6 +219,12 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
         - m.[xvar] for xvar in xvars
         - m.[yvar]
         
+    Tips:
+        - 'xvars', if user-defined, should be bounded by 'minmax' of FoKL model 'GP';
+          this is not technically required since the GP is a polynomial, but is recommended because the GP is not intended to extrapolate.
+            - 'm.[xvars[j]].setlb(GP.minmax[j][0])'
+            - 'm.[xvars[j]].setub(GP.minmax[j][1])'
+
     """
     # Process input arguments:
     self, xvars, yvar, m, draws, t_span, mtx, betas, minmax = _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax)
@@ -224,15 +235,7 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
         i += 1
 
     # Create Pyomo model with GP:
-    mGP = _gp_as_pyomo(f"GP{i}", m.t, self.phis, draws, mtx, betas)
-
-    # Apply normalization:
-    
-    def _eq_norm(mGP, t, j):
-        """Normalization constraint."""
-        return mGP.x[t, j] == (xvars[j][t] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
-
-    mGP.constr_norm = pyo.Constraint(m.t, mGP.attributes, rule=_eq_norm)
+    mGP = _gp_as_pyomo(f"GP{i}", m.t, self.phis, draws, mtx, betas, xvars, minmax)
 
     # Set 'yvar' equal to GP:
     
