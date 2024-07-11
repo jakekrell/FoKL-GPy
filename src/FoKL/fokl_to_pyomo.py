@@ -82,7 +82,7 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
     fix_betas(mGP, betas)
 
     # Define normalized attributes (i.e., input variables):
-    mGP.x = pyo.Var(tvec, mGP.attributes, bounds=(0, 1), initialize=0.5)
+    mGP.x = pyo.Var(tvec, mGP.attributes, bounds=(0, 1))
 
     # ===================================================================
     # Define polynomials (i.e., "basis" functions):
