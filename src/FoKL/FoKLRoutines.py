@@ -2,13 +2,13 @@ from FoKL import getKernels
 from FoKL.fokl_to_pyomo import fokl_to_pyomo
 import os
 import sys
-# # -----------------------------------------------------------------------
-# # # UNCOMMENT IF USING LOCAL FOKL PACKAGE:
-# dir = os.path.abspath(os.path.dirname(__file__))  # directory of script
-# sys.path.append(os.path.join(dir, '..', '..'))  # package directory
-# from src.FoKL import getKernels
-# from src.FoKL.fokl_to_pyomo import fokl_to_pyomo
-# # -----------------------------------------------------------------------
+# -----------------------------------------------------------------------
+# # UNCOMMENT IF USING LOCAL FOKL PACKAGE:
+dir = os.path.abspath(os.path.dirname(__file__))  # directory of script
+sys.path.append(os.path.join(dir, '..', '..'))  # package directory
+from src.FoKL import getKernels
+from src.FoKL.fokl_to_pyomo import fokl_to_pyomo
+# -----------------------------------------------------------------------
 import pandas as pd
 import warnings
 import itertools
@@ -1744,9 +1744,9 @@ class FoKL:
 
         return
 
-    def to_pyomo(self, xvars, yvars, m=None, xfix=None, yfix=None, truescale=True, std=True, draws=None):
-        """Passes arguments to external function. See 'fokl_to_pyomo' for more documentation."""
-        return fokl_to_pyomo(self, xvars, yvars, m, xfix, yfix, truescale, std, draws)
+    def to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None):
+        """Wrapper to pass arguments to external function 'fokl_to_pyomo'. See 'fokl_to_pyomo' for documentation."""
+        return fokl_to_pyomo(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax)
 
     def save(self, filename=None, directory=None):
         """
