@@ -76,13 +76,13 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
     mGP.orders = pyo.Set(initialize = np.unique(mtx[mtx != 0]))  # orders of basis functions
     mGP.attributes = pyo.Set(initialize = range(mtx.shape[1]))  # input variables
 
-    # Define beta variables:
-    mGP.beta = pyo.Var(mGP.draws, mGP.terms, domain=pyo.Reals)
-    mGP.beta_avg = pyo.Var(mGP.terms, domain=pyo.Reals)
+    # Define beta coefficients:
+    mGP.beta = pyo.Param(mGP.draws, mGP.terms, mutable=True)  # mutable=True, to change the value dynamically
+    mGP.beta_avg = pyo.Param(mGP.terms, mutable=True)
     fix_betas(mGP, betas)
 
     # Define normalized attributes (i.e., input variables):
-    mGP.x = pyo.Var(tvec, mGP.attributes, initialize=0.0, domain=pyo.Reals, bounds=(0, 1))
+    mGP.x = pyo.Var(tvec, mGP.attributes, bounds=(0, 1), initialize=0.5)
 
     # ===================================================================
     # Define polynomials (i.e., "basis" functions):
@@ -94,21 +94,17 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
             for order_j in orders_j[orders_j != 0]:
                 nj.append([order_j, attribute])
     
-    mGP.phi = pyo.Var(tvec, nj, initialize=0.0, domain=pyo.Reals)
-
     def _eq_phi(mGP, t, n, j):
         """FoKL's 'basis' functions."""
         nm1 = n - 1  # Python indexing, since n=1 refers to B1 which is phis[0]
-        return mGP.phi[t, n, j] == phis[nm1][0] + sum(phis[nm1][k] * mGP.x[t, j] ** k for k in range(1, len(phis[nm1])))
+        return phis[nm1][0] + sum(phis[nm1][k] * mGP.x[t, j] ** k for k in range(1, len(phis[nm1])))
 
-    mGP.constr_phi = pyo.Constraint(tvec, nj, rule=_eq_phi)
+    mGP.phi = pyo.Expression(tvec, nj, rule=_eq_phi)
 
     # ===================================================================
     # Build GP expression:
 
     # Draws:
-
-    mGP.y = pyo.Var(tvec, mGP.draws, initialize=0.0, domain=pyo.Reals)
 
     def _eq_y(mGP, t, draw):
         """FoKL's GP equation."""
@@ -125,13 +121,11 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
 
             y += y_term
 
-        return mGP.y[t, draw] == y
+        return y
 
-    mGP.constr_y = pyo.Constraint(tvec, mGP.draws, rule=_eq_y)
+    mGP.y = pyo.Expression(tvec, mGP.draws, rule=_eq_y)
 
     # Average:
-
-    mGP.y_avg = pyo.Var(tvec, initialize=0.0, domain=pyo.Reals)
 
     def _eq_y_avg(mGP, t):
         """FoKL's GP equation, averaged across draws."""
@@ -148,19 +142,17 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
 
             y += y_term
 
-        return mGP.y_avg[t] == y
+        return y
 
-    mGP.constr_y_avg = pyo.Constraint(tvec, rule=_eq_y_avg)
+    mGP.y_avg = pyo.Expression(tvec, rule=_eq_y_avg)
 
     # Standard deviation:
 
-    mGP.y_std = pyo.Var(tvec, initialize=0.0, domain=pyo.Reals)
-
     def _eq_y_std(mGP, t):
         """Standard deviation of draws from FoKL's GP equation."""
-        return mGP.y_std[t] == sqrt(sum(mGP.y[t, draw] ** 2 for draw in mGP.draws) / len(mGP.draws) + 1e-9)
+        return sqrt(sum(mGP.y[t, draw] ** 2 for draw in mGP.draws) / len(mGP.draws) + 1e-9)
 
-    mGP.constr_y_std = pyo.Constraint(tvec, rule=_eq_y_std)
+    mGP.y_std = pyo.Expression(tvec, rule=_eq_y_std)
 
     return mGP
 
@@ -174,26 +166,26 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas):
 
 def fix_betas(mGP, betas):
     """
-    Fix the already-initialized Pyomo beta variables to scalar values in 'betas', using last 'betas' draw as first Pyomo draw. Include average.
+    Fix the already-initialized Pyomo beta parameters to scalar values in 'betas', using last 'betas' draw as first Pyomo draw. Include average.
     
     | Argument | Type        | Description                                                                       |
     |----------|-------------|-----------------------------------------------------------------------------------|
     | mGP      | Pyomo model | sub-model containing the GP, i.e., 'm.GP#' where # is the integer index of the GP |
     | betas    | ndarray     | [draws x terms] beta coefficients of GP model                                     |
     
-    | Output | Type        | Description                                                                                    |
-    |--------|-------------|------------------------------------------------------------------------------------------------|
-    | mGP    | Pyomo model | sub-model 'm.GP#' with 'm.GP#.beta' and 'm.GP#.beta_avg' variables now with their values fixed |
+    | Output | Type        | Description                                                                                     |
+    |--------|-------------|-------------------------------------------------------------------------------------------------|
+    | mGP    | Pyomo model | sub-model 'm.GP#' with 'm.GP#.beta' and 'm.GP#.beta_avg' parameters now with their values fixed |
 
     """
-    # Fix 'beta_avg':
+    # Update value of 'beta_avg' Param:
     betas_avg = np.mean(betas[-len(mGP.draws)::, :], axis=0)
     for term in mGP.terms:
-        mGP.beta_avg[term].fix(betas_avg[term])
+        mGP.beta_avg[term] = betas_avg[term]
 
-        # Fix 'beta':
+        # Update value of 'beta' Param:
         for draw in mGP.draws:
-            mGP.beta[draw, term].fix(betas[-(draw + 1), term])
+            mGP.beta[draw, term] = betas[-(draw + 1), term]
 
 
 def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None):
