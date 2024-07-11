@@ -12,7 +12,7 @@ from scipy.interpolate import interp1d
 import numpy as np
 import pyomo.environ as pyo
 import pyomo.dae as dae
-
+import matplotlib.pyplot as plt
 
 
 # =====================================================================
@@ -124,16 +124,22 @@ m = pyo.ConcreteModel('TCLab Heater with GP Model')
 m.t = dae.ContinuousSet(bounds=(t0, tf))
 
 # Define the state variables as a function of time
-m.Ts1 = pyo.Var(m.t, initialize=Tamb)
+m.Ts1 = pyo.Var(m.t)
 
 # Define the control variable (heater power) as a function of time
-m.u1 = pyo.Var(m.t, bounds=(0, 100), initialize=0.0)  # != Q1f(t0)
+m.u1 = pyo.Var(m.t, bounds=(0, 100))  # != Q1f(t0)
 
 # Define the derivative of the control variable
-m.du1 = dae.DerivativeVar(m.u1, initialize=0.0)  # != dQ1f(t0)
+m.du1 = dae.DerivativeVar(m.u1)  # != dQ1f(t0)
 
 # Define the derivatives of the state variables
-m.dTs1 = dae.DerivativeVar(m.Ts1, initialize=0.0)
+m.dTs1 = dae.DerivativeVar(m.Ts1)
+
+# Fix the initial conditions
+m.Ts1[t0].fix(Tamb)
+m.dTs1[t0].fix(0.0)
+m.u1[t0].fix(0.0)
+m.du1[t0].fix(0.0)
 
 # Arguments to embed GP in Pyomo model:
 xvars = [m.Ts1, m.u1, m.du1]
@@ -148,9 +154,6 @@ GP_dT.to_pyomo(xvars, yvar, m, draws)
 def ise(m, t):
     return (r(t) - m.Ts1[t]) ** 2
 
-# Fix the initial conditions
-m.Ts1[t0].fix(Tamb)
-
 # Define the objective function
 @m.Objective(sense=pyo.minimize)
 def objective(m):
@@ -163,11 +166,16 @@ m.pprint()
 # OPTIMIZATION USING GP MODEL - SOLVER:
 
 # Apply a collocation method to numerically integrate the differential equations
-pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=1000, wrt=m.t)
+pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=200, wrt=m.t)
 
 # Call our nonlinear optimization/equation solver, Ipopt
-# pyo.SolverFactory('ipopt').solve(m)
-pyo.SolverFactory('multistart').solve(m, solver='ipopt', suppress_unbounded_warning=True)  # also infeasible
-# also infeasible for GP trained on [Ts1, u1] only (no du1)
-# also infeasible for dt=1, nfe=1000
+pyo.SolverFactory('ipopt').solve(m, tee=True)
+
+# Print solution
+tvec = m.t.data()
+plt.figure()
+plt.plot(tvec, r(tvec))
+plt.plot(tvec, m.Ts1[:]())
+plt.legend(['r(t)', 'Ts1 (Var)'])
+plt.show()
 
