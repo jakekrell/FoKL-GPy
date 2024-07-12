@@ -1,3 +1,12 @@
+"""
+
+Acknowledgement:
+    - https://idaes-pse.readthedocs.io/en/stable/tutorials/getting_started/binaries.html#binary-packages
+        - All technical papers, sales and publicity material resulting from use of the HSL codes within Ipopt must
+        contain the following acknowledgement: HSL, a collection of Fortran codes for large-scale scientific
+        computation. See http://www.hsl.rl.ac.uk.
+
+"""
 from FoKL import FoKLRoutines
 import os
 dir = os.path.abspath('')  # directory of notebook
@@ -13,6 +22,7 @@ import numpy as np
 import pyomo.environ as pyo
 import pyomo.dae as dae
 import matplotlib.pyplot as plt
+from pyomo.dae import Simulator
 
 
 # =====================================================================
@@ -127,19 +137,16 @@ m.t = dae.ContinuousSet(bounds=(t0, tf))
 m.Ts1 = pyo.Var(m.t)
 
 # Define the control variable (heater power) as a function of time
-m.u1 = pyo.Var(m.t, bounds=(0, 100))  # != Q1f(t0)
+m.u1 = pyo.Var(m.t, bounds=(0, 100), initialize=50.0)  # != Q1f(t0)
 
 # Define the derivative of the control variable
-m.du1 = dae.DerivativeVar(m.u1)  # != dQ1f(t0)
+m.du1 = dae.DerivativeVar(m.u1, wrt=m.t)  # != dQ1f(t0)
 
 # Define the derivatives of the state variables
-m.dTs1 = dae.DerivativeVar(m.Ts1)
+m.dTs1 = dae.DerivativeVar(m.Ts1, wrt=m.t)
 
 # Fix the initial conditions
 m.Ts1[t0].fix(Tamb)
-m.dTs1[t0].fix(0.0)
-m.u1[t0].fix(0.0)
-m.du1[t0].fix(0.0)
 
 # Arguments to embed GP in Pyomo model:
 xvars = [m.Ts1, m.u1, m.du1]
@@ -147,35 +154,97 @@ yvar = m.dTs1
 draws = 5
 
 # Embed GP:
-GP_dT.to_pyomo(xvars, yvar, m, draws)
+GP_dT.to_pyomo(xvars, yvar, m, draws, with_blocks=False)
 
-# Define the integral of the squared error
-@m.Integral(m.t)
-def ise(m, t):
-    return (r(t) - m.Ts1[t]) ** 2
+#============
+#============
+# Sim
 
-# Define the objective function
-@m.Objective(sense=pyo.minimize)
-def objective(m):
-    return m.ise
+if 1:  # Pyomo Simulator
 
-m.pprint()
+    m.du1_dummy = pyo.Var(m.t)
 
-# =====================================================================
-# =====================================================================
-# OPTIMIZATION USING GP MODEL - SOLVER:
+    def _diffeq1(m, t):
+        return m.du1[t] == m.du1_dummy[t]
 
-# Apply a collocation method to numerically integrate the differential equations
-pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=200, wrt=m.t)
+    m.diffeq1 = pyo.Constraint(m.t, rule=_diffeq1)
 
-# Call our nonlinear optimization/equation solver, Ipopt
-pyo.SolverFactory('ipopt').solve(m, tee=True)
+    m.var_input = pyo.Suffix(direction=pyo.Suffix.LOCAL)
+    # m.var_input[m.u1] = {t0: 50}
 
-# Print solution
-tvec = m.t.data()
-plt.figure()
-plt.plot(tvec, r(tvec))
-plt.plot(tvec, m.Ts1[:]())
-plt.legend(['r(t)', 'Ts1 (Var)'])
-plt.show()
+    m.var_input[m.du1_dummy] = {t0: 0}
+    m.var_input[m.y_avg] = {t0: 1}
+
+    sim = Simulator(m, package='casadi')
+    tsim, profiles = sim.simulate(
+        numpoints=100, integrator='idas', varying_inputs=m.var_input
+    )
+
+    plt.plot(tsim, profiles)
+    plt.show()
+
+#============
+#============
+#============
+#============
+
+else:  # IPOPT
+
+    # Define the integral of the squared error
+    @m.Integral(m.t)
+    def ise(m, t):
+        return (r(t) - m.Ts1[t]) ** 2
+
+    # Define the objective function
+    @m.Objective(sense=pyo.minimize)
+    def objective(m):
+        return m.ise
+
+    # m.pprint()
+
+    # =====================================================================
+    # =====================================================================
+    # OPTIMIZATION USING GP MODEL - SOLVER:
+
+    # Apply a collocation method to numerically integrate the differential equations
+    pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=100, wrt=m.t)
+
+    # maybe loop over t steps in model; interp u based on csv sol from benchmark; fix u in this model to force 0 DoF --> simulate with IPOPT
+    def u_ref(t):
+        """estimate, not csv"""
+        return np.interp(t,
+                         [0, 30, 180, 200, 400],
+                         [0, 100, 0, 60, 0])
+
+    # for i, t in enumerate(m.t):
+    #     m.u1[t].fix(u_ref(t))
+
+    # Call our nonlinear optimization/equation solver, Ipopt
+    solver = pyo.SolverFactory('ipopt')
+    solver.options['linear_solver'] = 'ma27'
+    solver.solve(m, tee=True)
+
+    # Print solution
+
+    tvec = m.t.data()
+
+    fig, axs = plt.subplots(2, 2)
+
+    axs[0, 0].plot()
+    axs[0, 0].plot(tvec, r(tvec))
+    axs[0, 0].plot(tvec, m.Ts1[:]())
+    axs[0, 0].legend(['r(t)', 'Ts1 (Var)'])
+
+    axs[0, 1].plot(tvec, m.u1[:]())
+    axs[0, 1].legend(['u1 (Var)'])
+
+    axs[1, 1].plot(tvec, m.du1[:]())
+    axs[1, 1].legend(['du1 (Var)'])
+
+    axs[1, 0].plot(tvec, m.dTs1[:]())
+    axs[1, 0].legend(['dTs1 (Var)'])
+
+    plt.show()
+
+b=1
 

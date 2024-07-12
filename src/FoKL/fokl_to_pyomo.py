@@ -62,10 +62,15 @@ def _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax):
     return self, xvars, yvar, m, draws, t_span, mtx, betas, minmax
 
 
-def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax):
+def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None):
     """tvec == m.t"""
     # Initialize sub-model for GP:
-    mGP = pyo.ConcreteModel(name)
+    if model is None:
+        mGP = pyo.ConcreteModel(name)
+        _with_block = True
+    else:
+        mGP = model
+        _with_block = False
 
     # Some constants:
     mtx = np.array(mtx, dtype=int)  # indices/orders of basis functions (where 1 is B1 and 0 means none)
@@ -193,7 +198,7 @@ def fix_betas(mGP, betas):
             mGP.beta[draw, term] = betas[-(draw + 1), term]
 
 
-def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None):
+def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None, with_blocks=False):
     """
     Convert GP model from FoKL class to Pyomo model.
     
@@ -226,16 +231,27 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
             - 'm.[xvars[j]].setub(GP.minmax[j][1])'
 
     """
+    if with_blocks is True and m is None:
+        raise NotImplementedError()
+
     # Process input arguments:
     self, xvars, yvar, m, draws, t_span, mtx, betas, minmax = _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax)
 
     # Find next available GP index:
-    i = 0
-    while m.find_component(f"GP{i}") is not None:
-        i += 1
+    if with_blocks is True:
+        i = 0
+        while m.find_component(f"GP{i}") is not None:
+            i += 1
 
     # Create Pyomo model with GP:
-    mGP = _gp_as_pyomo(f"GP{i}", m.t, self.phis, draws, mtx, betas, xvars, minmax)
+    if with_blocks is False:
+        model = m
+        gp_name = 'GP Model'
+    else:
+        model = None
+        gp_name = f"GP{i}"
+    # mGP = _gp_as_pyomo(f"GP{i}", m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model)
+    mGP = _gp_as_pyomo(gp_name, m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model)
 
     # Set 'yvar' equal to GP:
     
@@ -246,7 +262,12 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
     mGP.constr_yvar = pyo.Constraint(m.t, rule=_constr_yvar)
 
     # Merge 'mGP' with global Pyomo model:
-    m.add_component(f"GP{i}", mGP)
+    if with_blocks is True:
+        m.add_component(f"GP{i}", mGP)
 
-    return m
+        return m
+
+    else:
+
+        return mGP
 
