@@ -7,6 +7,16 @@ Acknowledgement:
         computation. See http://www.hsl.rl.ac.uk.
 
 """
+# =====================================================================
+# =====================================================================
+# SYSTEM-LEVEL PARAMETERS:
+
+Simulate = False  # boolean to use dae.Simulator; uses IPOPT if false
+
+# =====================================================================
+# =====================================================================
+# MODULES:
+
 from FoKL import FoKLRoutines
 import os
 dir = os.path.abspath('')  # directory of notebook
@@ -172,7 +182,7 @@ GP_dT.to_pyomo(xvars, yvar, m, draws, with_blocks=False)
 # =====================================================================
 # SOLVE WITH SIMULATOR:
 
-if 0:
+if Simulate is True:
 
     # To enable dae.Simulator to run, the DerivativeVar's need to exist as the LHS of a Constraint.
     # m.dTs1 already satisifies this, with the m.y_avg Expression from FoKL as the RHS.
@@ -207,13 +217,7 @@ if 0:
 # =====================================================================
 # SOLVE WITH IPOPT:
 
-else:
-
-    m.du1_dummy = pyo.Var(m.t)
-
-    @m.Constraint(m.t)
-    def constr_dudt(m, t):
-        return m.du1[t] == m.du1_dummy[t]
+if Simulate is False:
 
     # Define the integral of the squared error
     @m.Integral(m.t)
@@ -279,6 +283,4 @@ else:
     axs[1, 0].legend(['dTs1 (Var)'])
 
     plt.show()
-
-b=1
 
