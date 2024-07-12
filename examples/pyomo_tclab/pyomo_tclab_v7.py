@@ -22,6 +22,7 @@ import numpy as np
 import pyomo.environ as pyo
 import pyomo.dae as dae
 import matplotlib.pyplot as plt
+from scipy.interpolate import interp1d
 from pyomo.dae import Simulator
 
 
@@ -119,9 +120,17 @@ t_grid = np.linspace(t0, tf, n + 1)
 # ambient temperature
 Tamb = 21.0
 
+# time points of setpoint/reference values
+tr = [t0, 50, 150, 450, 550, tf]
+
 # setpoint/reference
 def r(t):
-    return np.interp(t, [0, 50, 150, 450, 550], [Tamb, Tamb, 60, 60, 35])
+    return np.interp(t, tr, [Tamb, Tamb, 60, 60, 35, 35])
+
+# derivative of setpoint/reference
+dr_interp = interp1d(tr, [0, (60 - Tamb) / 100, 0, (35 - 60) / 100, 0, 0], kind='previous')
+def dr(t):
+    return float(dr_interp(t))
 
 # =====================================================================
 # =====================================================================
@@ -156,39 +165,55 @@ draws = 5
 # Embed GP:
 GP_dT.to_pyomo(xvars, yvar, m, draws, with_blocks=False)
 
-#============
-#============
-# Sim
+# =====================================================================
+# =====================================================================
+# OPTIMIZATION USING GP MODEL - SOLVER:
 
-if 1:  # Pyomo Simulator
+# =====================================================================
+# SOLVE WITH SIMULATOR:
 
+if 0:
+
+    # To enable dae.Simulator to run, the DerivativeVar's need to exist as the LHS of a Constraint.
+    # m.dTs1 already satisifies this, with the m.y_avg Expression from FoKL as the RHS.
+    # Creating a dummy so that m.du1 may also satisfy this:
     m.du1_dummy = pyo.Var(m.t)
 
-    def _diffeq1(m, t):
+    @m.Constraint(m.t)
+    def constr_dudt(m, t):
         return m.du1[t] == m.du1_dummy[t]
 
-    m.diffeq1 = pyo.Constraint(m.t, rule=_diffeq1)
-
+    # Then, the RHS's need to be initialized:
     m.var_input = pyo.Suffix(direction=pyo.Suffix.LOCAL)
-    # m.var_input[m.u1] = {t0: 50}
+    m.var_input[m.du1_dummy] = {t0: 0}  # == m.du1
+    m.var_input[m.y_avg] = {}  # == m.dTs1, defined to match the control reference trajectory
+    for t in tr:
+        m.var_input[m.y_avg].update({t: dr(t)})
 
-    m.var_input[m.du1_dummy] = {t0: 0}
-    m.var_input[m.y_avg] = {t0: 1}
-
+    # Simulate:
     sim = Simulator(m, package='casadi')
     tsim, profiles = sim.simulate(
         numpoints=100, integrator='idas', varying_inputs=m.var_input
     )
 
+    # Plot:
     plt.plot(tsim, profiles)
+    plt.title('Simulation Results, dTs1 = d(r)/dt, du1[t0] = 0')
+    plt.xlabel('Time (s)')
+    plt.legend(['Ts1 (°C)', 'u1 (%)'])
+    plt.grid()
     plt.show()
 
-#============
-#============
-#============
-#============
+# =====================================================================
+# SOLVE WITH IPOPT:
 
-else:  # IPOPT
+else:
+
+    m.du1_dummy = pyo.Var(m.t)
+
+    @m.Constraint(m.t)
+    def constr_dudt(m, t):
+        return m.du1[t] == m.du1_dummy[t]
 
     # Define the integral of the squared error
     @m.Integral(m.t)
@@ -200,31 +225,40 @@ else:  # IPOPT
     def objective(m):
         return m.ise
 
-    # m.pprint()
-
-    # =====================================================================
-    # =====================================================================
-    # OPTIMIZATION USING GP MODEL - SOLVER:
-
     # Apply a collocation method to numerically integrate the differential equations
     pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=100, wrt=m.t)
 
-    # maybe loop over t steps in model; interp u based on csv sol from benchmark; fix u in this model to force 0 DoF --> simulate with IPOPT
-    def u_ref(t):
-        """estimate, not csv"""
-        return np.interp(t,
-                         [0, 30, 180, 200, 400],
-                         [0, 100, 0, 60, 0])
+    # Fix u1 to benchmark solution, forcing 0 DoF for sake of debugging:
 
-    # for i, t in enumerate(m.t):
-    #     m.u1[t].fix(u_ref(t))
+    u1_benchmark = np.loadtxt(os.path.join(dir, 'data', 'u1_benchmark_solution.csv'), delimiter=',')
+    u1_benchmark = np.concatenate([np.array([t0, 0])[np.newaxis, :],
+                                   u1_benchmark[1:107, :],
+                                   u1_benchmark[130:218, :],
+                                   u1_benchmark[243:354, :],
+                                   u1_benchmark[370::, :]], axis=0)  # remove oscillations
+
+    def u_ref(t):
+        """u1 values from benchmark solution."""
+        u1 = np.interp(t, u1_benchmark[:, 0], u1_benchmark[:, 1])
+        if u1 < 0:
+            return 0
+        elif u1 > 100:
+            return 100
+        else:
+            return u1
+
+    for t in m.t:
+        # m.y_avg[t] = dr(t)  # forces Ts1 to match r(t), but u1 is unaffected
+        # m.dTs1[t].fix(dr(t))  # Ts1 gets shape but has large "stepwise" jumps in value
+        # m.u1[t].fix(u_ref(t))  # Ts1 not accurate
+        m.u1[t] = u_ref(t)  # initialized but not fixed; same solution as without this initialization
 
     # Call our nonlinear optimization/equation solver, Ipopt
     solver = pyo.SolverFactory('ipopt')
     solver.options['linear_solver'] = 'ma27'
     solver.solve(m, tee=True)
 
-    # Print solution
+    # Plot solution
 
     tvec = m.t.data()
 
