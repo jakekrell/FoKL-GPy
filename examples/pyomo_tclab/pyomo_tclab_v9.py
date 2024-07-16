@@ -17,14 +17,16 @@ import pyomo.dae as dae
 # System-level parameters:
 
 Tamb = 21  # ambient temperature (C)
-Tmax = 140  # maximumum temperature, i.e., steady state of u=100 (C)
+Tmax = 110 - Tamb  # maximumum temperature, i.e., steady state of u=100; 100-Tamb so that u=50 yields 55 C like data
 t0 = 0  # start time (s)
 dt = 1  # time step (s)
-t_ramp = 800  # estimated time to reach steady state (s)
-t_rest = 200  # time to "rest" at steady state for sake of obtaining dT=0 training data
-t_drop = 400  # estimated time to return to Tamb (s)
-n = 10  # number of step tests to obtain data for
+t_ramp = 1000  # estimated time to reach steady state (s)
+t_rest = 50  # time to "rest" at steady state for sake of obtaining dT=0 training data
+t_drop = 800  # estimated time to return to Tamb (s)
+n = 20  # number of step tests to obtain data for
 
+# =====================================================================
+# =====================================================================
 # Generate data for demonstration:
 
 u1_tests = np.linspace(100 / n, 100, n)  # heater power (%), const. values at which to obtain data
@@ -105,10 +107,19 @@ for i in range(len(ax)):
 
 plt.show()
 
-GP = FoKLRoutines.FoKL(kernel=1)
-_ = GP.fit([T, u], dT, clean=True)
+# =====================================================================
+# =====================================================================
+# GP model:
 
-_ = GP.coverage3(plot=True, title="Validation of GP", xlabel="Time (s)", ylabel="Derivative (C/s)")
+filename = os.path.join("models", "pyomo_tclab_v9.fokl")
+try:
+    GP = FoKLRoutines.load(filename)
+except Exception as exception:
+    GP = FoKLRoutines.FoKL(kernel=1, UserWarnings=False, aic=True)
+    GP.fit([T - Tamb, u], dT, clean=True, pillow=[[0.01, 0.05], [0, 0]])
+    GP.save(filename)
+
+GP.coverage3(plot=True, title="Validation of GP", xlabel="Time (s)", ylabel="Derivative (C/s)")
 
 # =====================================================================
 # =====================================================================
@@ -122,19 +133,14 @@ n = round(tf / dt)
 tvec = np.linspace(t0, tf, n + 1)
 
 # ambient temperature
-Tamb = 21
+Tamb = 21.0
 
 # time points of setpoint/reference values
 tr = [t0, 50, 150, 450, 550, tf]
 
 # setpoint/reference
 def r(t):
-    return np.interp(t, tr, [Tamb, Tamb, 60, 60, 35, 35])
-
-# derivative of setpoint/reference
-dr_interp = interp1d(tr, [0, (60 - Tamb) / 100, 0, (35 - 60) / 100, 0, 0], kind='previous')
-def dr(t):
-    return float(dr_interp(t))
+    return np.interp(t, tr, np.array([Tamb, Tamb, 60, 60, 35, 35]) - Tamb)
 
 # =====================================================================
 # =====================================================================
@@ -147,7 +153,7 @@ m = pyo.ConcreteModel('TCLab Heater with GP Model')
 m.t = dae.ContinuousSet(bounds=(t0, tf))
 
 # Define the state variables as a function of time
-m.Ts1 = pyo.Var(m.t)
+m.Ts1 = pyo.Var(m.t)  # == T - Tamb
 
 # Define the control variable (heater power) as a function of time
 m.u1 = pyo.Var(m.t, bounds=(0, 100))
@@ -156,7 +162,7 @@ m.u1 = pyo.Var(m.t, bounds=(0, 100))
 m.dTs1 = dae.DerivativeVar(m.Ts1, wrt=m.t)
 
 # Fix the initial conditions
-m.Ts1[t0].fix(Tamb)
+m.Ts1[t0].fix(0.0)
 
 # Arguments to embed GP in Pyomo model:
 xvars = [m.Ts1, m.u1]
@@ -165,6 +171,17 @@ draws = 5
 
 # Embed GP:
 GP.to_pyomo(xvars, yvar, m, draws, with_blocks=False)
+
+# =====================================================================
+# =====================================================================
+# U1 BENCHMARK:
+
+u1_benchmark = np.loadtxt(os.path.join(dir, 'data', 'u1_benchmark_solution.csv'), delimiter=',')
+u1_benchmark = np.concatenate([np.array([t0, 0])[np.newaxis, :],
+                               u1_benchmark[1:107, :],
+                               u1_benchmark[130:218, :],
+                               u1_benchmark[243:354, :],
+                               u1_benchmark[370:-1, :]], axis=0)  # remove oscillations
 
 # =====================================================================
 # =====================================================================
@@ -185,26 +202,27 @@ pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=100, wrt=m.t)
 
 # Call our nonlinear optimization/equation solver, Ipopt
 solver = pyo.SolverFactory('ipopt')
-solver.options['linear_solver'] = 'ma27'  # ma57
+solver.options['linear_solver'] = 'ma57'
 solver.solve(m, tee=True)
 
 # Plot solution
 
 tvec = m.t.data()
 
-fig, axs = plt.subplots(3)
+fig, axs = plt.subplots(3, sharex=True)
+fig.suptitle("IPOPT Results")
+fig.supxlabel("Time (s)")
 
 axs[0].plot()
-axs[0].plot(tvec, r(tvec))
-axs[0].plot(tvec, m.Ts1[:]())
+axs[0].plot(tvec, r(tvec) + Tamb)
+axs[0].plot(tvec, np.array(m.Ts1[:]()) + Tamb)
 axs[0].legend(['r(t)', 'Ts1 (Var)'])
 
 axs[1].plot(tvec, m.dTs1[:]())
-axs[1].plot(tvec, m.y_avg[:]())
 axs[1].plot(tvec, GP.evaluate([m.Ts1[:](), m.u1[:]()], clean=True))  # GP confirmation
-axs[1].legend(['dTs1 (Var)', 'm.y_avg', 'dTs1 (GP check)'])
+axs[1].legend(['dTs1 (Var)', 'dT (GP)'])
 
-# axs[2].plot(u1_benchmark[:, 0], u1_benchmark[:, 1])
+axs[2].plot(u1_benchmark[:, 0], u1_benchmark[:, 1])
 axs[2].plot(tvec, m.u1[:]())
 axs[2].legend(['u1 (benchmark)', 'u1 (Var)'])
 
