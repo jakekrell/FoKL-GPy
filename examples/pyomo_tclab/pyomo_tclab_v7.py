@@ -155,6 +155,7 @@ m.du1 = dae.DerivativeVar(m.u1, wrt=m.t)  # != dQ1f(t0)
 m.dTs1 = dae.DerivativeVar(m.Ts1, wrt=m.t)
 
 # Fix the initial conditions
+m.u1[t0].fix(0.0)
 m.Ts1[t0].fix(Tamb)
 
 # Arguments to embed GP in Pyomo model:
@@ -169,10 +170,35 @@ GP_dT.to_pyomo(xvars, yvar, m, draws, with_blocks=False)
 # =====================================================================
 # OPTIMIZATION USING GP MODEL - SOLVER:
 
+# Fix u1 to benchmark solution, forcing 0 DoF for sake of debugging:
+
+u1_benchmark = np.loadtxt(os.path.join(dir, 'data', 'u1_benchmark_solution.csv'), delimiter=',')
+u1_benchmark = np.concatenate([np.array([t0, 0])[np.newaxis, :],
+                               u1_benchmark[1:107, :],
+                               u1_benchmark[130:218, :],
+                               u1_benchmark[243:354, :],
+                               u1_benchmark[370:-1, :]], axis=0)  # remove oscillations
+
+def u1_ref(t):
+    """u1 values from benchmark solution."""
+    u1 = np.interp(t, u1_benchmark[:, 0], u1_benchmark[:, 1])
+    if u1 < 0:
+        return 0
+    elif u1 > 100:
+        return 100
+    else:
+        return u1
+
+du1_benchmark = np.array([u1_benchmark[:, 0], np.gradient(u1_benchmark[:, 1], u1_benchmark[:, 0])]).T
+
+def du1_ref(t):
+    """du1 values via u1 from benchmark solution."""
+    return np.interp(t, du1_benchmark[:, 0], du1_benchmark[:, 1])
+
 # =====================================================================
 # SOLVE WITH SIMULATOR:
 
-if 0:
+if 1:
 
     # To enable dae.Simulator to run, the DerivativeVar's need to exist as the LHS of a Constraint.
     # m.dTs1 already satisifies this, with the m.y_avg Expression from FoKL as the RHS.
@@ -185,8 +211,10 @@ if 0:
 
     # Then, the RHS's need to be initialized:
     m.var_input = pyo.Suffix(direction=pyo.Suffix.LOCAL)
-    m.var_input[m.du1_dummy] = {t0: 0}  # == m.du1
+    m.var_input[m.du1_dummy] = {}  # == m.du1, defined via 'u1_benchmark'
     m.var_input[m.y_avg] = {}  # == m.dTs1, defined to match the control reference trajectory
+    for t in du1_benchmark[:, 0]:
+        m.var_input[m.du1_dummy].update({t: du1_ref(t)})
     for t in tr:
         m.var_input[m.y_avg].update({t: dr(t)})
 
@@ -209,12 +237,6 @@ if 0:
 
 else:
 
-    m.du1_dummy = pyo.Var(m.t)
-
-    @m.Constraint(m.t)
-    def constr_dudt(m, t):
-        return m.du1[t] == m.du1_dummy[t]
-
     # Define the integral of the squared error
     @m.Integral(m.t)
     def ise(m, t):
@@ -228,34 +250,16 @@ else:
     # Apply a collocation method to numerically integrate the differential equations
     pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=100, wrt=m.t)
 
-    # Fix u1 to benchmark solution, forcing 0 DoF for sake of debugging:
-
-    u1_benchmark = np.loadtxt(os.path.join(dir, 'data', 'u1_benchmark_solution.csv'), delimiter=',')
-    u1_benchmark = np.concatenate([np.array([t0, 0])[np.newaxis, :],
-                                   u1_benchmark[1:107, :],
-                                   u1_benchmark[130:218, :],
-                                   u1_benchmark[243:354, :],
-                                   u1_benchmark[370::, :]], axis=0)  # remove oscillations
-
-    def u_ref(t):
-        """u1 values from benchmark solution."""
-        u1 = np.interp(t, u1_benchmark[:, 0], u1_benchmark[:, 1])
-        if u1 < 0:
-            return 0
-        elif u1 > 100:
-            return 100
-        else:
-            return u1
-
     for t in m.t:
         # m.y_avg[t] = dr(t)  # forces Ts1 to match r(t), but u1 is unaffected
         # m.dTs1[t].fix(dr(t))  # Ts1 gets shape but has large "stepwise" jumps in value
-        # m.u1[t].fix(u_ref(t))  # Ts1 not accurate
-        m.u1[t] = u_ref(t)  # initialized but not fixed; same solution as without this initialization
+        # m.u1[t].fix(u1_ref(t))  # Ts1 not accurate
+        # m.u1[t] = u1_ref(t)  # initialized but not fixed; same solution as without this initialization
+        m.du1[t] = du1_ref(t)  #
 
     # Call our nonlinear optimization/equation solver, Ipopt
     solver = pyo.SolverFactory('ipopt')
-    solver.options['linear_solver'] = 'ma27'
+    solver.options['linear_solver'] = 'ma27'  # ma57
     solver.solve(m, tee=True)
 
     # Plot solution

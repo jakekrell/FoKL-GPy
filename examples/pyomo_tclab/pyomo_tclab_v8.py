@@ -2,7 +2,6 @@
 
 Change Log:
     - v8 like v7.py but including step test in training data
-        - v8b removed du1
 
 Acknowledgement:
     - https://idaes-pse.readthedocs.io/en/stable/tutorials/getting_started/binaries.html#binary-packages
@@ -43,11 +42,11 @@ tvec = list(df["Time"].values for df in data)
 Q1 = list(df["Q1"].values for df in data)
 TS1 = list(df["T1"].values for df in data)
 
-for i in range(2):
-    Q1[i][Q1[i] < 0] = 0
-    Q1[i][Q1[i] > 100] = 100
-
 Q1f = list(interp1d(tvec[i], Q1[i], kind='previous') for i in range(n))  # piecewise Q1
+dQ1f_analytic = [lambda t: 1500 * np.cos(30 * np.pi * t / tvec[0][-1]) * np.pi / tvec[0][-1], 
+                 lambda t: 0 * t]  # derivative of analytic Q1
+dQ1f = list(interp1d(tvec[i], dQ1f_analytic[i](tvec[i]), kind='previous') for i in range(n))  # piecewise derivative of analytic Q1
+dQ1f_values = list(dQ1f[i](tvec[i]) for i in range(n))
 
 # =====================================================================
 # =====================================================================
@@ -111,14 +110,14 @@ for i in range(n):
 # =====================================================================
 # GP MODEL OF DIFFERENTIATED SINE TEST:
 
-filename = os.path.join("models", "pyomo_tclab_v8b.fokl")
+filename = os.path.join("models", "pyomo_tclab_v8.fokl")
 try:
     GP_dT = FoKLRoutines.load(filename)
 except Exception as exception:
     GP_dT = FoKLRoutines.FoKL(kernel=1, UserWarnings=False, aic=True)
-    GP_dT.fit([np.concatenate(TS1_smooth), np.concatenate(Q1)],
+    GP_dT.fit([np.concatenate(TS1_smooth), np.concatenate(Q1), np.concatenate(dQ1f_values)],
               np.concatenate(dTS1), 
-              clean=True, minmax=[[15, 75], [0, 100]])
+              clean=True)
     GP_dT.save(filename)
 
 GP_dT.coverage3(plot='sorted')
@@ -165,6 +164,9 @@ m.Ts1 = pyo.Var(m.t)
 # Define the control variable (heater power) as a function of time
 m.u1 = pyo.Var(m.t, bounds=(0, 100), initialize=50)  # != Q1f(t0)
 
+# Define the derivative of the control variable
+m.du1 = dae.DerivativeVar(m.u1, wrt=m.t)  # != dQ1f(t0)
+
 # Define the derivatives of the state variables
 m.dTs1 = dae.DerivativeVar(m.Ts1, wrt=m.t)
 
@@ -173,7 +175,7 @@ m.u1[t0].fix(0)
 m.Ts1[t0].fix(Tamb)
 
 # Arguments to embed GP in Pyomo model:
-xvars = [m.Ts1, m.u1]
+xvars = [m.Ts1, m.u1, m.du1]
 yvar = m.dTs1
 draws = 5
 
@@ -255,9 +257,9 @@ else:
     # Define the error model
     @m.Integral(m.t)
     def ise(m, t):
-        return (r(t) - m.Ts1[t]) ** 2  # == ise (integral of squared error); great ramp up but failed ramp down
+        # return (r(t) - m.Ts1[t]) ** 2  # == ise (integral of squared error); great ramp up but failed ramp down
         # return abs(r(t) - m.Ts1[t])  # fail
-        # return exp(abs(r(t) - m.Ts1[t]))  # jumpy but gets ramp down; may be worth investigation
+        return exp(abs(r(t) - m.Ts1[t]))  # jumpy but gets ramp down; may be worth investigation
         # return 1.001 ** abs(r(t) - m.Ts1[t])  # fail
         # return sqrt((r(t) - m.Ts1[t]) ** 2)  # == sqrt(ise) = abs(error); fail
         # return (dr(t) - m.dTs1[t]) ** 2  # == ise, with GP; fail
@@ -299,19 +301,19 @@ else:
     axs[0, 1].plot(tvec, m.u1[:]())
     axs[0, 1].legend(['u1 (benchmark)', 'u1 (Var)'])
 
-    # axs[1, 1].plot(du1_benchmark[:, 0], du1_benchmark[:, 1])
-    # axs[1, 1].plot(tvec, m.du1[:]())
-    # axs[1, 1].legend(['du1 (benchmark)', 'du1 (Var)'])
+    axs[1, 1].plot(du1_benchmark[:, 0], du1_benchmark[:, 1])
+    axs[1, 1].plot(tvec, m.du1[:]())
+    axs[1, 1].legend(['du1 (benchmark)', 'du1 (Var)'])
 
     axs[1, 0].plot(tvec, m.dTs1[:]())
     axs[1, 0].plot(tvec, m.y_avg[:]())
-    axs[1, 0].plot(tvec, GP_dT.evaluate([m.Ts1[:](), m.u1[:]()], clean=True))  # GP confirmation
+    axs[1, 0].plot(tvec, GP_dT.evaluate([m.Ts1[:](), m.u1[:](), m.du1[:]()], clean=True))  # GP confirmation
     axs[1, 0].legend(['dTs1 (Var)', 'm.y_avg', 'dTs1 (GP check)'])
 
     for i in range(2):
         for j in range(2):
             axs[i, j].grid()
 
-    # plt.savefig(os.path.join(dir, 'data', 'pyomo_tclab_v8b_ipopt.png'))
+    # plt.savefig(os.path.join(dir, 'data', 'pyomo_tclab_v8_ipopt.png'))
     plt.show()
 
