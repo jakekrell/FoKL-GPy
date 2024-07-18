@@ -1744,9 +1744,9 @@ class FoKL:
 
         return
 
-    def to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None, with_blocks=False):
+    def to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None, with_blocks=False, scenarios=None):
         """Wrapper to pass arguments to external function 'fokl_to_pyomo'. See 'fokl_to_pyomo' for documentation."""
-        return fokl_to_pyomo(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax, with_blocks)
+        return fokl_to_pyomo(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax, with_blocks, scenarios)
 
     def save(self, filename=None, directory=None):
         """

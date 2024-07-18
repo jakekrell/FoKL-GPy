@@ -62,7 +62,7 @@ def _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax):
     return self, xvars, yvar, m, draws, t_span, mtx, betas, minmax
 
 
-def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None):
+def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None, scenarios=None):
     """tvec == m.t"""
     # Initialize sub-model for GP:
     if model is None:
@@ -76,10 +76,28 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None)
     mtx = np.array(mtx, dtype=int)  # indices/orders of basis functions (where 1 is B1 and 0 means none)
 
     # Some sets:
-    mGP.draws = pyo.Set(initialize = range(draws))
     mGP.terms = pyo.Set(initialize = range(mtx.shape[0] + 1))  # terms (including beta0)
     mGP.orders = pyo.Set(initialize = np.unique(mtx[mtx != 0]))  # orders of basis functions
     mGP.attributes = pyo.Set(initialize = range(mtx.shape[1]))  # input variables
+    if scenarios is not None:
+        if len(scenarios) == draws:
+            raise NotImplementedError("Currently, length of 'scenarios' must equal 'draws'.")
+        mGP.draws = scenarios  # to allow 'm.s' to be strings, etc.
+    else:
+        # mGP.draws = pyo.Set(initialize = range(draws))
+
+    # COMMENTS:
+    #   - if s None
+    #       - m.s_temp = range(1)  # placeholder index
+    #   - if len(s or m.s_temp) == 1  # (and draws != 1 ... else require draws > 1)
+    #       - avg draws into single scenario
+    #   - elif len(s) == draws
+    #       - then each draw is scenario
+    #   - else not implemented
+
+    # ================
+    # RTW:
+
 
     # Define beta coefficients:
     mGP.beta = pyo.Param(mGP.draws, mGP.terms, mutable=True)  # mutable=True, to change the value dynamically
@@ -88,11 +106,18 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None)
 
     # Define expression of normalized attributes (i.e., input variables):
     
+    # TWO VERSIONS OF EQ_NORM / OR SWITCH CASE IN SINGLE FUNC:
+
     def _eq_norm(mGP, t, j):
-        """Normalization constraint."""
+        """Normalization constraint. (scenarios is None) ... modify slightly to index m.s_temp==1"""
+        return (xvars[j][t] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+    
+    def _eq2_norm(mGP, t, j):
+        """Normalization constraint. (scenarios is not None) ... index xvars by m.s"""
         return (xvars[j][t] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
 
-    mGP.x = pyo.Expression(tvec, mGP.attributes, rule=_eq_norm)
+    # mGP.x = pyo.Expression(tvec, mGP.attributes, rule=_eq_norm)
+    mGP.x = pyo.Expression(tvec, scenarios, mGP.attributes, rule=_eq_norm)
 
     # ===================================================================
     # Define polynomials (i.e., "basis" functions):
@@ -104,10 +129,14 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None)
             for order_j in orders_j[orders_j != 0]:
                 nj.append([order_j, attribute])
     
+    # X NEEDS TO BE INDEXED BY m.s
+
     def _eq_phi(mGP, t, n, j):
         """FoKL's 'basis' functions."""
         nm1 = n - 1  # Python indexing, since n=1 refers to B1 which is phis[0]
         return phis[nm1][0] + sum(phis[nm1][k] * mGP.x[t, j] ** k for k in range(1, len(phis[nm1])))
+
+    # INDEX BY m.s
 
     mGP.phi = pyo.Expression(tvec, nj, rule=_eq_phi)
 
@@ -115,6 +144,8 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None)
     # Build GP expression:
 
     # Draws:
+
+    # CONSIDER AVERAGING ALL TO PLACE IN SINGLE SCENARIO, OR EACH DRAW IN EACH SCENARIO (IN WHICH CASE NO Y_AVG NEEDED)
 
     def _eq_y(mGP, t, draw):
         """FoKL's GP equation."""
@@ -135,34 +166,34 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None)
 
     mGP.y = pyo.Expression(tvec, mGP.draws, rule=_eq_y)
 
-    # Average:
+    # Average (IGNORE FOR NOW BECAUSE m.s):
 
-    def _eq_y_avg(mGP, t):
-        """FoKL's GP equation, averaged across draws."""
-        y = mGP.beta_avg[0]  # initialize
+    # def _eq_y_avg(mGP, t):
+    #     """FoKL's GP equation, averaged across draws."""
+    #     y = mGP.beta_avg[0]  # initialize
         
-        for term in range(1, len(mGP.terms)):  # == m.terms[1::]
-            y_term = mGP.beta_avg[term]
+    #     for term in range(1, len(mGP.terms)):  # == m.terms[1::]
+    #         y_term = mGP.beta_avg[term]
 
-            for j in mGP.attributes:
-                n = mtx[term - 1, j]
+    #         for j in mGP.attributes:
+    #             n = mtx[term - 1, j]
 
-                if n != 0:  # since 0 means none
-                    y_term *= mGP.phi[t, n, j]
+    #             if n != 0:  # since 0 means none
+    #                 y_term *= mGP.phi[t, n, j]
 
-            y += y_term
+    #         y += y_term
 
-        return y
+    #     return y
 
-    mGP.y_avg = pyo.Expression(tvec, rule=_eq_y_avg)
+    # mGP.y_avg = pyo.Expression(tvec, rule=_eq_y_avg)
 
-    # Standard deviation:
+    # Standard deviation (IGNORE FOR NOW):
 
-    def _eq_y_std(mGP, t):
-        """Standard deviation of draws from FoKL's GP equation."""
-        return sqrt(sum(mGP.y[t, draw] ** 2 for draw in mGP.draws) / len(mGP.draws) + 1e-9)
+    # def _eq_y_std(mGP, t):
+    #     """Standard deviation of draws from FoKL's GP equation."""
+    #     return sqrt(sum(mGP.y[t, draw] ** 2 for draw in mGP.draws) / len(mGP.draws) + 1e-9)
 
-    mGP.y_std = pyo.Expression(tvec, rule=_eq_y_std)
+    # mGP.y_std = pyo.Expression(tvec, rule=_eq_y_std)
 
     return mGP
 
@@ -198,7 +229,7 @@ def fix_betas(mGP, betas):
             mGP.beta[draw, term] = betas[-(draw + 1), term]
 
 
-def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None, with_blocks=False):
+def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None, with_blocks=False, scenarios=None):
     """
     Convert GP model from FoKL class to Pyomo model.
     
@@ -213,7 +244,9 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
     | mtx      | ndarray                                    | GP's interaction matrix                                                                                                                                                                  |
     | betas    | ndarray                                    | GP's coefficients                                                                                                                                                                        |
     | minmax   | list of lists of two floats                | GP's normalization of input variables [[min, max], ..., [min, max]]                                                                                                                      |
-
+    | -
+    | -
+    
     | Output | Type        | Description                                        |
     |--------|-------------|----------------------------------------------------|
     | m      | Pyomo model | input argument 'm' with 'self' embedded as 'm.GP#' |
@@ -251,10 +284,12 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
         model = None
         gp_name = f"GP{i}"
     # mGP = _gp_as_pyomo(f"GP{i}", m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model)
-    mGP = _gp_as_pyomo(gp_name, m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model)
+    mGP = _gp_as_pyomo(gp_name, m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model, scenarios=scenarios)
 
     # Set 'yvar' equal to GP:
     
+    # IF s IS NONE --> yvar not indexed by m.s; else is; etc.  ---> maybe two versions of constr.
+
     def _constr_yvar(mGP, t):
         """Set 'yvar' equal to GP."""
         return yvar[t] == mGP.y_avg[t]
@@ -270,4 +305,14 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
     else:
 
         return mGP
+    
+
+
+    # -----------------
+    #TODO
+    #   - reproduce with s is None
+    #   - then try s (with all xvars as [m.t, m.s])
+
+
+
 
