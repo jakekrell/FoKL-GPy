@@ -89,6 +89,14 @@ for i in range(n):
 
 T += np.random.rand(len(T))  # add noise
 
+def u_cutoff(u):
+    """Enforce [0, 100] bounds."""
+    u[u < 0] = 0
+    u[u > 100] = 100
+    return u
+
+u = u_cutoff(u)
+
 # =====================================================================
 # =====================================================================
 # SMOOTH AND DIFFERENTIATE:
@@ -141,25 +149,25 @@ def gradient_h4(x, h):
 dT = gradient_h4(T, dt)  # derivative of smoothed
 dTf = interp1d(tvec, dT, kind='previous')  # piecewise, grab previous value
 
-fig, ax = plt.subplots(3, sharex=True, figsize=(12, 6))
-fig.suptitle("Generated Data")
-fig.supxlabel("Time (s)")
-
-ax[0].set_ylabel("Heater Power (%)")
-ax[0].plot(tvec, u)
-
-ax[1].set_ylabel("Temperature (C)")
-ax[1].plot(tvec, T_raw)
-ax[1].plot(tvec, T)
-ax[1].legend(['Raw', 'Smooth'])
-
-ax[2].set_ylabel("Derivative (C/s)")
-ax[2].plot(tvec, dT)
-
-for i in range(len(ax)):
-    ax[i].grid()
-
-plt.show()
+# fig, ax = plt.subplots(3, sharex=True, figsize=(12, 6))
+# fig.suptitle("Generated Data")
+# fig.supxlabel("Time (s)")
+#
+# ax[0].set_ylabel("Heater Power (%)")
+# ax[0].plot(tvec, u)
+#
+# ax[1].set_ylabel("Temperature (C)")
+# ax[1].plot(tvec, T_raw)
+# ax[1].plot(tvec, T)
+# ax[1].legend(['Raw', 'Smooth'])
+#
+# ax[2].set_ylabel("Derivative (C/s)")
+# ax[2].plot(tvec, dT)
+#
+# for i in range(len(ax)):
+#     ax[i].grid()
+#
+# plt.show()
 
 # =====================================================================
 # =====================================================================
@@ -167,102 +175,97 @@ plt.show()
 
 filename = os.path.join(dir, "models", "pyomo_tclab_v10.fokl")
 try:
-    GP != FoKLRoutines.load(filename)
+    GP = FoKLRoutines.load(filename)
 except Exception as exception:
     GP = FoKLRoutines.FoKL(kernel=1, UserWarnings=False, aic=True)
     GP.fit([T - Tamb, u], dT, clean=True, pillow=[[0.01, 0.05], [0, 0]])
-    # GP.save(filename)
+    GP.save(filename)
 
-# =====================================================================
-# =====================================================================
-# SINE TEST FOR GP VALIDATION:
-
-# =====================================================================
-# LOAD AND PARSE DATA (SINE TEST):
-
-sine_data = pd.read_csv(os.path.join(dir, "data", "tclab_sine_test.csv"))
-
-sine_tvec = sine_data["Time"].values
-sine_u = sine_data["Q1"].values
-sine_T = sine_data["T1"].values
-sine_Tamb = sine_T[0]
-
-sine_T_raw = sine_T
-sine_T = smooth(sine_T_raw, window)  # smooth
-
-sine_dT = gradient_h4(sine_T, sine_tvec[1] - sine_tvec[0])  # derivative
-
-def u_cutoff(u):
-    """Enforce [0, 100] bounds."""
-    u[u < 0] = 0
-    u[u > 100] = 100
-    return u
-
-sine_u = u_cutoff(sine_u)
-
-# =====================================================================
-# CONTROLLER REFERENCE TRAJECTORY (SINE TEST):
-
-def sine_r(t):
-    return np.interp(t, sine_tvec, sine_T - sine_Tamb)
-
-# =====================================================================
-# PYOMO MODEL (SINE TEST):
-
-sine_m = pyo.ConcreteModel("Sine Test")
-sine_m.t = dae.ContinuousSet(bounds=(sine_tvec[0], sine_tvec[-1]))
-sine_m.TmTamb = pyo.Var(sine_m.t, bounds=GP.minmax[0])  # == T - Tamb
-sine_m.u = pyo.Var(sine_m.t, bounds=(0, 100))
-sine_m.dT = dae.DerivativeVar(sine_m.TmTamb, wrt=sine_m.t)
-sine_m.TmTamb[sine_tvec[0]].fix(0.0)
-GP.to_pyomo([sine_m.TmTamb, sine_m.u], sine_m.dT, sine_m, 100, with_blocks=False)
-
-# =====================================================================
-# IPOPT (SINE TEST):
-
-# Define the error model
-@sine_m.Integral(sine_m.t)
-def ise(sine_m, t):
-    return (sine_r(t) - sine_m.TmTamb[t]) ** 2
-
-# Define the objective function
-@sine_m.Objective(sense=pyo.minimize)
-def objective(sine_m):
-    return sine_m.ise
-
-# Apply a collocation method to numerically integrate the differential equations
-pyo.TransformationFactory('dae.collocation').apply_to(sine_m, nfe=len(sine_tvec), wrt=sine_m.t)
-
-# Call our nonlinear optimization/equation solver, Ipopt
+# Prepare Pyomo solver:
 solver = pyo.SolverFactory('ipopt')
 solver.options['linear_solver'] = 'ma57'
-solver.solve(sine_m, tee=True)
 
-# Plot solution
-
-sine_sol_tvec = sine_m.t.data()
-
-fig, axs = plt.subplots(3, sharex=True)
-fig.suptitle("IPOPT Results of Sine Test for GP Validation")
-fig.supxlabel("Time (s)")
-
-axs[0].plot()
-axs[0].plot(sine_tvec, sine_T)
-axs[0].plot(sine_sol_tvec, np.array(sine_m.TmTamb[:]()) + sine_Tamb)
-axs[0].legend(['T (data)', 'T (Pyomo)'])
-
-axs[1].plot(sine_tvec, sine_dT)
-axs[1].plot(sine_sol_tvec, sine_m.dT[:]())
-axs[1].legend(['dT (data)', 'dT (Pyomo)'])
-
-axs[2].plot(sine_tvec, sine_u)
-axs[2].plot(sine_sol_tvec, sine_m.u[:]())
-axs[2].legend(['u (data)', 'u (Pyomo)'])
-
-for i in range(3):
-    axs[i].grid()
-
-plt.show()
+# # =====================================================================
+# # =====================================================================
+# # SINE TEST FOR GP VALIDATION:
+#
+# # =====================================================================
+# # LOAD AND PARSE DATA (SINE TEST):
+#
+# sine_data = pd.read_csv(os.path.join(dir, "data", "tclab_sine_test.csv"))
+#
+# sine_tvec = sine_data["Time"].values
+# sine_u = sine_data["Q1"].values
+# sine_T = sine_data["T1"].values
+# sine_Tamb = sine_T[0]
+#
+# sine_T_raw = sine_T
+# sine_T = smooth(sine_T_raw, window)  # smooth
+#
+# sine_dT = gradient_h4(sine_T, sine_tvec[1] - sine_tvec[0])  # derivative
+# sine_u = u_cutoff(sine_u)
+#
+# # =====================================================================
+# # CONTROLLER REFERENCE TRAJECTORY (SINE TEST):
+#
+# def sine_r(t):
+#     return np.interp(t, sine_tvec, sine_T - sine_Tamb)
+#
+# # =====================================================================
+# # PYOMO MODEL (SINE TEST):
+#
+# sine_m = pyo.ConcreteModel("Sine Test")
+# sine_m.t = dae.ContinuousSet(bounds=(sine_tvec[0], sine_tvec[-1]))
+# sine_m.TmTamb = pyo.Var(sine_m.t, bounds=GP.minmax[0])  # == T - Tamb
+# sine_m.u = pyo.Var(sine_m.t, bounds=(0, 100))
+# sine_m.dT = dae.DerivativeVar(sine_m.TmTamb, wrt=sine_m.t)
+# sine_m.TmTamb[sine_tvec[0]].fix(0.0)
+# GP.to_pyomo([sine_m.TmTamb, sine_m.u], sine_m.dT, sine_m, 20, with_blocks=False)
+#
+# # =====================================================================
+# # IPOPT (SINE TEST):
+#
+# # Define the error model
+# @sine_m.Integral(sine_m.t)
+# def ise(sine_m, t):
+#     return (sine_r(t) - sine_m.TmTamb[t]) ** 2
+#
+# # Define the objective function
+# @sine_m.Objective(sense=pyo.minimize)
+# def objective(sine_m):
+#     return sine_m.ise
+#
+# # Apply a collocation method to numerically integrate the differential equations
+# pyo.TransformationFactory('dae.collocation').apply_to(sine_m, nfe=len(sine_tvec), wrt=sine_m.t)
+#
+# # Call our nonlinear optimization/equation solver, Ipopt
+# solver.solve(sine_m, tee=True)
+#
+# # Plot solution
+#
+# sine_sol_tvec = sine_m.t.data()
+#
+# fig, axs = plt.subplots(3, sharex=True)
+# fig.suptitle("IPOPT Results of Sine Test for GP Validation")
+# fig.supxlabel("Time (s)")
+#
+# axs[0].plot()
+# axs[0].plot(sine_tvec, sine_T)
+# axs[0].plot(sine_sol_tvec, np.array(sine_m.TmTamb[:]()) + sine_Tamb)
+# axs[0].legend(['T (data)', 'T (Pyomo)'])
+#
+# axs[1].plot(sine_tvec, sine_dT)
+# axs[1].plot(sine_sol_tvec, sine_m.dT[:]())
+# axs[1].legend(['dT (data)', 'dT (Pyomo)'])
+#
+# axs[2].plot(sine_tvec, sine_u)
+# axs[2].plot(sine_sol_tvec, sine_m.u[:]())
+# axs[2].legend(['u (data)', 'u (Pyomo)'])
+#
+# for i in range(3):
+#     axs[i].grid()
+#
+# plt.show()
 
 # =====================================================================
 # =====================================================================
@@ -309,7 +312,12 @@ u1_benchmark = np.concatenate([np.array([t0, 0])[np.newaxis, :],
 # =====================================================================
 # OPTIMIZATION USING GP MODEL:
 
-for draws in [100]:  # [5, 10, 20, 40, 80, 160, 320]:
+draws_list = (np.linspace(10, 90, 9, dtype=int).tolist() +
+              np.linspace(100, 1000, 10, dtype=int).tolist())
+u_solution = pd.DataFrame(columns=["Time"] + draws_list)
+
+for draws in draws_list:
+    print(f"Draws = {draws}")
 
     # =================================================================
     # PYOMO MODEL:
@@ -344,27 +352,35 @@ for draws in [100]:  # [5, 10, 20, 40, 80, 160, 320]:
     # =================================================================
     # SOLUTION:
 
-    plt_tvec = m.t.data()
+    if draws == draws_list[0]:
+        u_solution["Time"] = m.t.data()  # same for all draws
+    u_solution[draws] = m.u[:]()  # save solution to DataFrame
 
-    fig, axs = plt.subplots(3, sharex=True)
-    fig.suptitle(f"IPOPT Results, {draws} draws")
-    fig.supxlabel("Time (s)")
+    u_solution.to_csv(os.path.join("data", "pyomo_tclab_v10_ipopt_u.csv"))  # save DataFrame to csv
 
-    axs[0].plot(plt_tvec, r(plt_tvec) + r_Tamb)
-    axs[0].plot(plt_tvec, np.array(m.TmTamb[:]()) + r_Tamb)
-    axs[0].legend(['r(t)', 'T (Pyomo)'])
-
-    axs[1].plot(plt_tvec, dr(plt_tvec))
-    axs[1].plot(plt_tvec, m.dT[:]())
-    axs[1].legend(['d(r)/dt', 'dT (Pyomo)'])
-
-    axs[2].plot(u1_benchmark[:, 0], u1_benchmark[:, 1])
-    axs[2].plot(plt_tvec, m.u[:]())
-    axs[2].legend(['u (benchmark)', 'u (Pyomo)'])
-
-    for i in range(3):
-        axs[i].grid()
-
-    plt.show()
-
+    # # =================================================================
+    # # PLOT:
+    #
+    # plt_tvec = m.t.data()
+    #
+    # fig, axs = plt.subplots(3, sharex=True)
+    # fig.suptitle(f"IPOPT Results, {draws} draws")
+    # fig.supxlabel("Time (s)")
+    #
+    # axs[0].plot(plt_tvec, r(plt_tvec) + r_Tamb)
+    # axs[0].plot(plt_tvec, np.array(m.TmTamb[:]()) + r_Tamb)
+    # axs[0].legend(['r(t)', 'T (Pyomo)'])
+    #
+    # axs[1].plot(plt_tvec, dr(plt_tvec))
+    # axs[1].plot(plt_tvec, m.dT[:]())
+    # axs[1].legend(['d(r)/dt', 'dT (Pyomo)'])
+    #
+    # axs[2].plot(u1_benchmark[:, 0], u1_benchmark[:, 1])
+    # axs[2].plot(plt_tvec, m.u[:]())
+    # axs[2].legend(['u (benchmark)', 'u (Pyomo)'])
+    #
+    # for i in range(3):
+    #     axs[i].grid()
+    #
+    # plt.show()
 
