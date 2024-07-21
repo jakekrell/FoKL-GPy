@@ -81,10 +81,18 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None,
     mGP.attributes = pyo.Set(initialize = range(mtx.shape[1]))  # input variables
     if scenarios is not None:
         if len(scenarios) == draws:
-            raise NotImplementedError("Currently, length of 'scenarios' must equal 'draws'.")
-        mGP.draws = scenarios  # to allow 'm.s' to be strings, etc.
+            raise NotImplementedError("Currently, length of 'scenarios' must equal 'draws'. In other words, 'scenarios' must index each of FoKL's 'draws'.")
+        mGP.draws = scenarios  # using 'scenarios' instead of 'range(draws)' allows 'm.s' to be strings, etc.
+    else:  # if 'scenarios' is None
+        mGP.draws = pyo.Set(initialize = range(draws))
+
+    if len(scenarios) == 1 or scenarios is None:  # then average draws into single Pyomo scenario
+
+
+    elif len(scenarios) == draws:  # then each draw is scenario
+
     else:
-        # mGP.draws = pyo.Set(initialize = range(draws))
+        raise NotImplementedError()
 
     # COMMENTS:
     #   - if s None
@@ -233,19 +241,19 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
     """
     Convert GP model from FoKL class to Pyomo model.
     
-    | Argument | Type                                       | Description                                                                                                                                                                              |
-    |----------|--------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-    | self     | FoKL class                                 | FoKL class object with Bernoulli Polynomials kernel, 'FoKLRoutines.FoKL(kernel=1)'                                                                                                       |
-    | xvars    | list of str, Pyomo components, and/or None | list of GP input variables; if str then defaults to 'pyo.Var()', else pre-define 'dae.DerivativeVar()', etc. in 'm' and pass component directly in list; 'None' to later define manually |
-    | yvar     | str, Pyomo component, and/or None          | GP output variable; behaves like 'xvars'                                                                                                                                                 |
-    | m        | Pyomo model                                | pre-defined Pyomo model                                                                                                                                                                  |
-    | draws    | int                                        | number of GP draws to embed in Pyomo                                                                                                                                                     |
-    | t_span   | list of two floats                         | integration time [t0, tf]; used to define 'm.t = dae.ContinuousSet(bounds=t_span)' if 'm.t' not defined, else 't_span' is ignored                                                        |
-    | mtx      | ndarray                                    | GP's interaction matrix                                                                                                                                                                  |
-    | betas    | ndarray                                    | GP's coefficients                                                                                                                                                                        |
-    | minmax   | list of lists of two floats                | GP's normalization of input variables [[min, max], ..., [min, max]]                                                                                                                      |
-    | -
-    | -
+    | Argument    | Type                                       | Description                                                                                                                                                                              |
+    |-------------|--------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+    | self        | FoKL class                                 | FoKL class object with Bernoulli Polynomials kernel, 'FoKLRoutines.FoKL(kernel=1)'                                                                                                       |
+    | xvars       | list of str, Pyomo components, and/or None | list of GP input variables; if str then defaults to 'pyo.Var()', else pre-define 'dae.DerivativeVar()', etc. in 'm' and pass component directly in list; 'None' to later define manually |
+    | yvar        | str, Pyomo component, and/or None          | GP output variable; behaves like 'xvars'                                                                                                                                                 |
+    | m           | Pyomo model                                | pre-defined Pyomo model                                                                                                                                                                  |
+    | draws       | int                                        | number of GP draws to embed in Pyomo                                                                                                                                                     |
+    | t_span      | list of two floats                         | integration time [t0, tf]; used to define 'm.t = dae.ContinuousSet(bounds=t_span)' if 'm.t' not defined, else 't_span' is ignored                                                        |
+    | mtx         | ndarray                                    | GP's interaction matrix                                                                                                                                                                  |
+    | betas       | ndarray                                    | GP's coefficients                                                                                                                                                                        |
+    | minmax      | list of lists of two floats                | GP's normalization of input variables [[min, max], ..., [min, max]]                                                                                                                      |
+    | with_blocks | boolean                                    | to define the GP's Pyomo components as a Pyomo block (i.e., sub-model) of the main Pyomo model 'm'                                                                                       |
+    | scenarios   | Pyomo set                                  | Pyomo scenarios over which to optimize; i.e., FoKL draws to optimize individually                                                                                                        |
     
     | Output | Type        | Description                                        |
     |--------|-------------|----------------------------------------------------|
@@ -263,6 +271,9 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
             - 'm.[xvars[j]].setlb(GP.minmax[j][0])'
             - 'm.[xvars[j]].setub(GP.minmax[j][1])'
 
+    TO-DO / FUTURE DEV.:
+        - 'with_blocks=False' SHOULD YIELD 'm.GP#_beta', etc.; CURRENTLY, 'm.beta' MEANS MULTIPLE GPs CANNOT BE SUPPORTED WITHOUT BLOCKS
+    
     """
     if with_blocks is True and m is None:
         raise NotImplementedError()
@@ -283,7 +294,6 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, 
     else:
         model = None
         gp_name = f"GP{i}"
-    # mGP = _gp_as_pyomo(f"GP{i}", m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model)
     mGP = _gp_as_pyomo(gp_name, m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model, scenarios=scenarios)
 
     # Set 'yvar' equal to GP:
