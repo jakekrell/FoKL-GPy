@@ -371,7 +371,6 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
 
     # Some sets:
     m.add_component(f"GP{i}_terms", pyo.Set(initialize = range(mtx.shape[0] + 1)))    # terms (including beta0)
-    m.add_component(f"GP{i}_orders", pyo.Set(initialize = np.unique(mtx[mtx != 0])))  # orders of basis functions
     m.add_component(f"GP{i}_attributes", pyo.Set(initialize = range(mtx.shape[1])))   # indices of input variables
     if isinstance(draws, int):
         m.add_component(f"GP{i}_draws", pyo.Set(initialize = range(draws)))           # draws (via int)
@@ -379,7 +378,6 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
     else:
         GPi_draws = draws                                                             # draws (via pre-defined scenarios, i.e., 'draws' Set); could be str's, etc.
     GPi_terms = m.component(f"GP{i}_terms")
-    GPi_orders = m.component(f"GP{i}_orders")
     GPi_attributes = m.component(f"GP{i}_attributes")
 
     # Define beta coefficients:
@@ -426,48 +424,49 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
         elif i_td[j] == [True, True]:
             m.add_component(f"GP{i}_x{j}", pyo.Expression(t, GPi_draws, rule=_eq_norm_11))
 
-    # Define polynomials, i.e., "basis" functions:
-
-    nj = []  # list of [order, attribute] combinations used in GP
-    for attribute in GPi_attributes:
-        orders_j = np.unique(mtx[:, attribute])
-        if any(orders_j != 0):
-            for order_j in orders_j[orders_j != 0]:
-                nj.append([order_j, attribute])
+    # Define orders of polynomials, i.e., "basis" functions:
 
     n = []  # list of lists per attribute containing basis function orders used for that attribute
     for j in GPi_attributes:
         orders_j = np.unique(mtx[:, j])
-        n.append([orders_j[orders_j != 0]])
+        n.append(orders_j[orders_j != 0].tolist())
+    
+    def _orders(m, j):
+        return n[j]
+        
+    m.add_component(f"GP{i}_orders", pyo.Set(GPi_attributes, initialize=_orders))  # orders of basis functions
+    GPi_orders = m.component(f"GP{i}_orders")
+
+    # Define polynomials, i.e., "basis" functions:
 
     def _eq_phi(x, nm1):
         return self.phis[nm1][0] + sum(self.phis[nm1][k] * x ** k for k in range(1, len(self.phis[nm1])))
     
-    def _eq_phi_00(m, n, j):
+    def _eq_phi_00(m, n):
         """Basis functions; no 't', no 'draws'."""
         return _eq_phi(m.component(f"GP{i}_x{j}"), n - 1)
 
-    def _eq_phi_01(m, draw, n, j):
+    def _eq_phi_01(m, draw, n):
         """Basis functions; no 't', yes 'draws'."""
         return _eq_phi(m.component(f"GP{i}_x{j}")[draw], n - 1)
     
-    def _eq_phi_10(m, t_ind, n, j):
+    def _eq_phi_10(m, t_ind, n):
         """Basis functions; yes 't', no 'draws'."""
         return _eq_phi(m.component(f"GP{i}_x{j}")[t_ind], n - 1)
     
-    def _eq_phi_11(m, t_ind, draw, n, j):
+    def _eq_phi_11(m, t_ind, draw, n):
         """Basis functions; yes 't', yes 'draws'."""
         return _eq_phi(m.component(f"GP{i}_x{j}")[t_ind, draw], n - 1)
 
     for j in GPi_attributes:
         if i_td[j] == [False, False]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(n[j], rule=_eq_phi_00))
+            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(GPi_orders[j], rule=_eq_phi_00))
         elif i_td[j] == [False, True]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(GPi_draws, n[j], rule=_eq_phi_01))
+            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(GPi_draws, GPi_orders[j], rule=_eq_phi_01))
         elif i_td[j] == [True, False]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(t, n[j], rule=_eq_phi_10))
+            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(t, GPi_orders[j], rule=_eq_phi_10))
         elif i_td[j] == [True, True]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(t, GPi_draws, n[j], rule=_eq_phi_11))
+            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(t, GPi_draws, GPi_orders[j], rule=_eq_phi_11))
 
     GPi_phi = list(m.component(f"GP{i}_phi_x{j}") for j in GPi_attributes)
 
@@ -523,9 +522,9 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
         m.add_component(f"GP{i}_y", pyo.Expression(t, GPi_draws, rule=_eq_y_1))
 
     # Build GP expression for average of draws:
-
-    def _eq_y_avg_00(m):
-        """GP equation average; no 't', no 'draws'."""
+    
+    def _eq_y_avg(t_ind=None, draw=None):
+        """GP equation average."""
         y = GPi_beta_avg[0]  # initialize
         
         for term in range(1, len(GPi_terms)):  # == GPi_terms[1::]
@@ -535,62 +534,34 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
                 n = mtx[term - 1, j]
 
                 if n != 0:  # since 0 means none
-                    y_term *= GPi_phi[j][n]  # SWITCH CASE APPLIED HERE
-
-            y += y_term
-
-        return y
-
-    def _eq_y_avg_01(m, draw):
-        """GP equation average; no 't', yes 'draws'."""
-        y = GPi_beta_avg[0]  # initialize
-        
-        for term in range(1, len(GPi_terms)):  # == GPi_terms[1::]
-            y_term = GPi_beta_avg[term]
-
-            for j in GPi_attributes:
-                n = mtx[term - 1, j]
-
-                if n != 0:  # since 0 means none
-                    y_term *= GPi_phi[j][draw, n]  # SWITCH CASE APPLIED HERE
+                    if i_td[j] == [False, False]:
+                        y_term *= GPi_phi[j][n]
+                    elif i_td[j] == [False, True]:
+                        y_term *= GPi_phi[j][draw, n]
+                    elif i_td[j] == [True, False]:
+                        y_term *= GPi_phi[j][t_ind, n]
+                    elif i_td[j] == [True, True]:
+                        y_term *= GPi_phi[j][t_ind, draw, n]
 
             y += y_term
 
         return y
     
+    def _eq_y_avg_00(m):
+        """GP equation average; no 't', no 'draws'."""
+        return _eq_y_avg()
+    
+    def _eq_y_avg_01(m, draw):
+        """GP equation average; no 't', yes 'draws'."""
+        return _eq_y_avg(draw=draw)
+    
     def _eq_y_avg_10(m, t_ind):
         """GP equation average; yes 't', no 'draws'."""
-        y = GPi_beta_avg[0]  # initialize
-        
-        for term in range(1, len(GPi_terms)):  # == GPi_terms[1::]
-            y_term = GPi_beta_avg[term]
-
-            for j in GPi_attributes:
-                n = mtx[term - 1, j]
-
-                if n != 0:  # since 0 means none
-                    y_term *= GPi_phi[j][t_ind, n]  # SWITCH CASE APPLIED HERE
-
-            y += y_term
-
-        return y
-
+        return _eq_y_avg(t_ind)
+    
     def _eq_y_avg_11(m, t_ind, draw):
         """GP equation average; yes 't', yes 'draws'."""
-        y = GPi_beta_avg[0]  # initialize
-        
-        for term in range(1, len(GPi_terms)):  # == GPi_terms[1::]
-            y_term = GPi_beta_avg[term]
-
-            for j in GPi_attributes:
-                n = mtx[term - 1, j]
-
-                if n != 0:  # since 0 means none
-                    y_term *= GPi_phi[j][t_ind, draw, n]  # SWITCH CASE APPLIED HERE
-
-            y += y_term
-
-        return y
+        return _eq_y_avg(t_ind, draw)
 
     if i_td[-1] == [False, False]:
         m.add_component(f"GP{i}_y_avg", pyo.Expression(rule=_eq_y_avg_00))
