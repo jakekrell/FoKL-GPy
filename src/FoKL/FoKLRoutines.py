@@ -1,5 +1,5 @@
-from FoKL import getKernels
-from FoKL.fokl_to_pyomo import fokl_to_pyomo
+# from FoKL import getKernels
+# from FoKL.fokl_to_pyomo import fokl_to_pyomo
 import os
 import sys
 # -----------------------------------------------------------------------
@@ -1744,9 +1744,9 @@ class FoKL:
 
         return
 
-    def to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None, with_blocks=False, scenarios=None):
+    def to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas=None, minmax=None):
         """Wrapper to pass arguments to external function 'fokl_to_pyomo'. See 'fokl_to_pyomo' for documentation."""
-        return fokl_to_pyomo(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax, with_blocks, scenarios)
+        return fokl_to_pyomo(self, xvars, yvar, m, t, draws, mtx, betas, minmax)
 
     def save(self, filename=None, directory=None):
         """

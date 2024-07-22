@@ -86,13 +86,10 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None,
     else:  # if 'scenarios' is None
         mGP.draws = pyo.Set(initialize = range(draws))
 
-    if len(scenarios) == 1 or scenarios is None:  # then average draws into single Pyomo scenario
-
-
-    elif len(scenarios) == draws:  # then each draw is scenario
-
-    else:
-        raise NotImplementedError()
+    # if len(scenarios) == 1 or scenarios is None:  # then average draws into single Pyomo scenario
+    # elif len(scenarios) == draws:  # then each draw is scenario
+    # else:
+    #     raise NotImplementedError()
 
     # COMMENTS:
     #   - if s None
@@ -213,115 +210,318 @@ def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None,
 # =============================================================================================================
 # Module functions:
 
-def fix_betas(mGP, betas):
+def fix_betas(m, betas, GPi_draws=None, i=0):
     """
-    Fix the already-initialized Pyomo beta parameters to scalar values in 'betas', using last 'betas' draw as first Pyomo draw. Include average.
+    Fix the already-initialized Pyomo beta Param's to scalar values in 'betas', using last 'betas' draw as first Pyomo draw. Include average.
     
-    | Argument | Type        | Description                                                                       |
-    |----------|-------------|-----------------------------------------------------------------------------------|
-    | mGP      | Pyomo model | sub-model containing the GP, i.e., 'm.GP#' where # is the integer index of the GP |
-    | betas    | ndarray     | [draws x terms] beta coefficients of GP model                                     |
+    | Argument  | Type          | Description                                     |
+    |-----------|---------------|-------------------------------------------------|
+    | m         | ConcreteModel | Pyomo model containing embedded GP              |
+    | betas     | ndarray       | [draws x terms] beta coefficients of FoKL model |
+    | GPi_draws | Set           | index of 'm.GP{i}_beta[draws, terms]'           |
+    | i         | int           | index of GP to update                           |
     
-    | Output | Type        | Description                                                                                     |
-    |--------|-------------|-------------------------------------------------------------------------------------------------|
-    | mGP    | Pyomo model | sub-model 'm.GP#' with 'm.GP#.beta' and 'm.GP#.beta_avg' parameters now with their values fixed |
+    | Output | Type          | Description                                  |
+    |--------|---------------|----------------------------------------------|
+    | m      | ConcreteModel | Pyomo model with 'm.GP{i}_beta' values fixed |
 
     """
-    # Update value of 'beta_avg' Param:
-    betas_avg = np.mean(betas[-len(mGP.draws)::, :], axis=0)
-    for term in mGP.terms:
-        mGP.beta_avg[term] = betas_avg[term]
+    if GPi_draws is None:
+        GPi_draws = m.component(f"GP{i}_draws")
 
-        # Update value of 'beta' Param:
-        for draw in mGP.draws:
-            mGP.beta[draw, term] = betas[-(draw + 1), term]
+    i_draw = -1  # index of draw (to index betas ndarray)
+    for draw in GPi_draws:
+        i_draw += 1
+        for term in m.component(f"GP{i}_terms"):
+            m.component(f"GP{i}_beta")[draw, term] = betas[-(i_draw + 1), term]
+
+    return m
 
 
-def fokl_to_pyomo(self, xvars, yvar, m=None, draws=None, t_span=None, mtx=None, betas=None, minmax=None, with_blocks=False, scenarios=None):
+def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas=None, minmax=None):
     """
     Convert GP model from FoKL class to Pyomo model.
     
-    | Argument    | Type                                       | Description                                                                                                                                                                              |
-    |-------------|--------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-    | self        | FoKL class                                 | FoKL class object with Bernoulli Polynomials kernel, 'FoKLRoutines.FoKL(kernel=1)'                                                                                                       |
-    | xvars       | list of str, Pyomo components, and/or None | list of GP input variables; if str then defaults to 'pyo.Var()', else pre-define 'dae.DerivativeVar()', etc. in 'm' and pass component directly in list; 'None' to later define manually |
-    | yvar        | str, Pyomo component, and/or None          | GP output variable; behaves like 'xvars'                                                                                                                                                 |
-    | m           | Pyomo model                                | pre-defined Pyomo model                                                                                                                                                                  |
-    | draws       | int                                        | number of GP draws to embed in Pyomo                                                                                                                                                     |
-    | t_span      | list of two floats                         | integration time [t0, tf]; used to define 'm.t = dae.ContinuousSet(bounds=t_span)' if 'm.t' not defined, else 't_span' is ignored                                                        |
-    | mtx         | ndarray                                    | GP's interaction matrix                                                                                                                                                                  |
-    | betas       | ndarray                                    | GP's coefficients                                                                                                                                                                        |
-    | minmax      | list of lists of two floats                | GP's normalization of input variables [[min, max], ..., [min, max]]                                                                                                                      |
-    | with_blocks | boolean                                    | to define the GP's Pyomo components as a Pyomo block (i.e., sub-model) of the main Pyomo model 'm'                                                                                       |
-    | scenarios   | Pyomo set                                  | Pyomo scenarios over which to optimize; i.e., FoKL draws to optimize individually                                                                                                        |
+    | Arg.   | Type                             | Description                                                                                                                                          | Default           |
+    |--------|----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------|
+    | self   | FoKL class                       | FoKL class object with Bernoulli Polynomials kernel, 'FoKLRoutines.FoKL(kernel=1)'                                                                   | -                 |
+    | xvars  | list of Pyomo component(s)       | list of GP input variable(s), i.e., attributes; can be pyo.Var, dae.DerivativeVar, etc.; when defining, index by 't' and/or 'draws' where applicable | -                 |
+    | yvar   | Pyomo component                  | GP output variable; behaves like 'xvars'                                                                                                             | -                 |
+    | m      | Pyomo model                      | pre-defined Pyomo model                                                                                                                              | pyo.ConcreteModel |
+    | t      | dae.ContinuousSet                | index for integration time to achieve ODE functionality, i.e., 't = dae.ContinuousSet(bounds=[t0, tf])'                                              | None              |
+    | draws  | int or pyo.Set                   | number of GP draws to embed in Pyomo, or Set indexing draws                                                                                          | self.draws        |
+    | mtx    | ndarray [terms - 1 x attributes] | GP's interaction matrix                                                                                                                              | self.mtx          |
+    | betas  | ndarray [draws x terms]          | GP's coefficients                                                                                                                                    | self.betas        |
+    | minmax | list of lists of two floats      | GP's normalization of input variables [[min, max], ..., [min, max]]                                                                                  | self.minmax       |
     
     | Output | Type        | Description                                        |
     |--------|-------------|----------------------------------------------------|
     | m      | Pyomo model | input argument 'm' with 'self' embedded as 'm.GP#' |
     
     Reserved Pyomo components:
-        - m.t
-        - m.GP#, where # is integer index of GP beginning at 0
-        - m.[xvar] for xvar in xvars
-        - m.[yvar]
+        - 'm.GP#', where # is integer index of GP beginning at 0; reservation includes all 'm.GP#_{str}' components too
         
     Tips:
-        - 'xvars', if user-defined, should be bounded by 'minmax' of FoKL model 'GP';
+        - 'xvars' gets bounded by 'minmax' of FoKL model 'self';
           this is not technically required since the GP is a polynomial, but is recommended because the GP is not intended to extrapolate.
             - 'm.[xvars[j]].setlb(GP.minmax[j][0])'
             - 'm.[xvars[j]].setub(GP.minmax[j][1])'
-
-    TO-DO / FUTURE DEV.:
-        - 'with_blocks=False' SHOULD YIELD 'm.GP#_beta', etc.; CURRENTLY, 'm.beta' MEANS MULTIPLE GPs CANNOT BE SUPPORTED WITHOUT BLOCKS
+        - 'yvar' indices are [t, draws] if passing in Pyomo components for 't', 'draws'; 'xvars' indices are assumed to be either [t], [draws], [t, draws], or none
     
     """
-    if with_blocks is True and m is None:
-        raise NotImplementedError()
+    # Process defaults:
+    if m is None:
+        m = pyo.ConcreteModel("FoKL-to-Pyomo Model")
+    if draws is None:
+        draws = self.draws
+    if mtx is None:
+        mtx = self.mtx
+    if betas is None:
+        betas = self.betas
+    if minmax is None:
+        minmax = self.minmax
+    
+    # Check for type errors:
+    if not isinstance(xvars, list):
+        raise TypeError()
+    for xvar in xvars:
+        if not any(isinstance(xvar, type) for type in [pyo.Var, dae.DerivativeVar]):
+            raise TypeError()
+    if not any(isinstance(yvar, type) for type in [pyo.Var, dae.DerivativeVar]):
+        raise TypeError()
+    if not isinstance(m, pyo.ConcreteModel):
+        raise TypeError()
+    if not (t is None or isinstance(t, dae.ContinuousSet)):
+        raise TypeError()
+    if not any(isinstance(draws, type) for type in [int, pyo.Set]):
+        raise TypeError()
+    if not isinstance(mtx, np.ndarray):
+        raise TypeError()
+    if not isinstance(betas, np.ndarray):
+        raise TypeError()
+    if not isinstance(minmax, list):
+        raise TypeError()
+    for minmax_i in minmax:
+        if not isinstance(minmax_i, list):
+            raise TypeError()
+        if not any(isinstance(minmax_i[i], float) for i in range(2)):
+            raise TypeError()
 
-    # Process input arguments:
-    self, xvars, yvar, m, draws, t_span, mtx, betas, minmax = _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax)
+    # Warn about index assumptions regarding time ('t') and/or scenarios ('draws'):
+    for var in [yvar] + xvars:
+        if var.dim() > 2:
+            raise NotImplementedError("Pyomo variables indexed by more than time ('t') and scenarios ('draws') are not supported.")
+    td = [isinstance(t, dae.ContinuousSet), isinstance(draws, pyo.Set)]
+    i_td = [[False, False]] * (1 + len(xvars))  # boolean array for how each variable in 'xvars + [yvar]' gets indexed; corresponds to ['t', 'draws'] indices
+    if all(td):
+        warnings.warn(f"Assuming '{yvar.name}' indexed by ['{t.name}', '{draws.name}'].", category=SyntaxWarning)
+        i_td[-1] = [True, True]  # yvar indexed by ['t', 'draws']
+        _warn_equal_len = True
+        i = -1
+        for xvar in xvars:
+            i += 1
+            if xvar.dim() == 2:
+                warnings.warn(f"Assuming '{xvar.name}' indexed by ['{t.name}', '{draws.name}'].", category=SyntaxWarning)
+                i_td[i] = [True, True]  # xvar indexed by ['t', 'draws']
+            elif xvar.dim() == 1:
+                if len(t) == len(draws):
+                    if _warn_equal_len:
+                        warnings.warn(f"Pyomo sets '{t.name}' and '{draws.name}' are indistinguishable due to equal length; assuming '{t.name}' as the index for variables with one dimension.", category=SyntaxError)
+                    _warn_equal_len = False
+                if len(xvar) == len(t):
+                    warnings.warn(f"Assuming '{xvar.name}' indexed by '{t.name}'.", category=SyntaxWarning)
+                    i_td[i][0] = True  # xvar indexed by 't'
+                elif len(xvar) == len(draws):
+                    warnings.warn(f"Assuming '{xvar.name}' indexed by '{draws.name}'.", category=SyntaxWarning)
+                    i_td[i][1] = True  # xvar indexed by 'draws'
+                else:
+                    raise NotImplementedError(f"'{xvar.name}' may only be indexed by '{t.name}' and/or '{draws.name}'.")
+            else:
+                warnings.warn(f"Assuming '{xvar.name}' not indexed.", category=SyntaxWarning)
+    elif td[0]:
+        warnings.warn(f"Assuming '{yvar.name}' indexed by '{t.name}'.", category=SyntaxWarning)
+        i_td[-1][0] = True  # yvar indexed by 't'
+        i = -1
+        for xvar in xvars:
+            i += 1
+            if xvar.dim() == 1:
+                warnings.warn(f"Assuming '{xvar.name}' indexed by '{t.name}'.", category=SyntaxWarning)
+                i_td[i][0] = True  # xvar indexed by 't'
+            else:
+                warnings.warn(f"Assuming '{xvar.name}' not indexed.", category=SyntaxWarning)
+    elif td[1]:
+        warnings.warn(f"Assuming '{yvar.name}' indexed by '{draws.name}'.", category=SyntaxWarning)
+        i_td[-1][1] = True  # yvar indexed by 'draws'
+        i = -1
+        for xvar in xvars:
+            i += 1
+            if xvar.dim() == 1:
+                warnings.warn(f"Assuming '{xvar.name}' indexed by '{draws.name}'.", category=SyntaxWarning)
+                i_td[i][1] = True  # xvar indexed by 'draws'
+            else:
+                warnings.warn(f"Assuming '{xvar.name}' not indexed.", category=SyntaxWarning)
 
     # Find next available GP index:
-    if with_blocks is True:
-        i = 0
-        while m.find_component(f"GP{i}") is not None:
-            i += 1
+    i = 0
+    while m.find_component(f"GP{i}") is not None:
+        i += 1
 
-    # Create Pyomo model with GP:
-    if with_blocks is False:
-        model = m
-        gp_name = 'GP Model'
+    # Some constants:
+    mtx = np.array(mtx, dtype=int)  # indices/orders of basis functions (where 1 is B1 and 0 means none)
+
+    # Some sets:
+    m.add_component(f"GP{i}_terms", pyo.Set(initialize = range(mtx.shape[0] + 1)))    # terms (including beta0)
+    m.add_component(f"GP{i}_orders", pyo.Set(initialize = np.unique(mtx[mtx != 0])))  # orders of basis functions
+    m.add_component(f"GP{i}_attributes", pyo.Set(initialize = range(mtx.shape[1])))   # indices of input variables
+    if isinstance(draws, int):
+        m.add_component(f"GP{i}_draws", pyo.Set(initialize = range(draws)))           # draws (via int)
+        GPi_draws = m.component(f"GP{i}_draws")
     else:
-        model = None
-        gp_name = f"GP{i}"
-    mGP = _gp_as_pyomo(gp_name, m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model, scenarios=scenarios)
+        GPi_draws = draws                                                             # draws (via pre-defined scenarios, i.e., 'draws' Set); could be str's, etc.
+    GPi_terms = m.component(f"GP{i}_terms")
+    GPi_orders = m.component(f"GP{i}_orders")
+    GPi_attributes = m.component(f"GP{i}_attributes")
 
-    # Set 'yvar' equal to GP:
+    # Define beta coefficients:
+    m.add_component(f"GP{i}_beta", pyo.Param(GPi_draws, GPi_terms, mutable=True))  # 'mutable=True', to change the values dynamically
+    GPi_beta = m.component(f"GP{i}_beta")
+
+    # Average beta coefficients:
     
-    # IF s IS NONE --> yvar not indexed by m.s; else is; etc.  ---> maybe two versions of constr.
-
-    def _constr_yvar(mGP, t):
-        """Set 'yvar' equal to GP."""
-        return yvar[t] == mGP.y_avg[t]
+    def _beta_avg(m, term):
+        """Average beta Param's rather than 'yvar' Expression's to yield faster Pyomo solutions.
+        Defining a 'beta_avg' Param would be faster and would not require 'yvar' draws, though this optional feature is left for future development."""
+        return sum(GPi_beta[draw, term] for draw in GPi_draws) / len(GPi_draws)
     
-    mGP.constr_yvar = pyo.Constraint(m.t, rule=_constr_yvar)
+    m.add_component(f"GP{i}_beta_avg", pyo.Expression(GPi_terms, rule=_beta_avg))    
+    fix_betas(m, betas, GPi_draws)
 
-    # Merge 'mGP' with global Pyomo model:
-    if with_blocks is True:
-        m.add_component(f"GP{i}", mGP)
+    # Define switch cases of normalized attributes:
 
-        return m
+    def _eq_norm_00(m):
+        """Normalization constraint; no 't', no 'draws')."""
+        return (xvars[j] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
 
-    else:
+    def _eq_norm_01(m, draw):
+        """Normalization constraint; no 't', yes 'draws'."""
+        return (xvars[j][draw] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
 
-        return mGP
+    def _eq_norm_10(m, t_ind):
+        """Normalization constraint; yes 't', no 'draws'."""
+        return (xvars[j][t_ind] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+
+    def _eq_norm_11(m, t_ind, draw):
+        """Normalization constraint; yes 't', yes 'draws'."""
+        return (xvars[j][t_ind, draw] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+
+    for j in GPi_attributes:
+        if i_td[j] == [False, False]:
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(rule=_eq_norm_00))
+        elif i_td[j] == [False, True]:
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(GPi_draws, rule=_eq_norm_01))
+        elif i_td[j] == [True, False]:
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(t, rule=_eq_norm_10))
+        elif i_td[j] == [True, True]:
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(t, GPi_draws, rule=_eq_norm_11))
+
+    
+
+    # ===============================================================================================================================
+    # ===============================================================================================================================
+    # ===============================================================================================================================
+    # ===============================================================================================================================
+    # ===============================================================================================================================
+    # ===============================================================================================================================
+    # ===============================================================================================================================
+    # RETURN TO WORK (RTW):
+
+    return
+
+
+
+    # ===================================================================
+    # Define polynomials (i.e., "basis" functions):
+    
+    nj = []  # list of [order, attribute] combinations used in GP
+    for attribute in mGP.attributes:
+        orders_j = np.unique(mtx[:, attribute])
+        if any(orders_j != 0):
+            for order_j in orders_j[orders_j != 0]:
+                nj.append([order_j, attribute])
+    
+    # X NEEDS TO BE INDEXED BY m.s
+
+    def _eq_phi(mGP, t, n, j):
+        """FoKL's 'basis' functions."""
+        nm1 = n - 1  # Python indexing, since n=1 refers to B1 which is phis[0]
+        return phis[nm1][0] + sum(phis[nm1][k] * mGP.x[t, j] ** k for k in range(1, len(phis[nm1])))
+
+    # INDEX BY m.s
+
+    mGP.phi = pyo.Expression(tvec, nj, rule=_eq_phi)
+
+
+
+
+
+
+
+    # if isinstance(t, dae.ContinuousSet):
+    #     for xvar in xvars:
+            
+
+
+
+
+
+
+    # if with_blocks is True and m is None:
+    #     raise NotImplementedError()
+
+    # # Process input arguments:
+    # self, xvars, yvar, m, draws, t_span, mtx, betas, minmax = _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax)
+
+    # # Find next available GP index:
+    # if with_blocks is True:
+    #     i = 0
+    #     while m.find_component(f"GP{i}") is not None:
+    #         i += 1
+
+    # # Create Pyomo model with GP:
+    # if with_blocks is False:
+    #     model = m
+    #     gp_name = 'GP Model'
+    # else:
+    #     model = None
+    #     gp_name = f"GP{i}"
+    # mGP = _gp_as_pyomo(gp_name, m.t, self.phis, draws, mtx, betas, xvars, minmax, model=model, scenarios=scenarios)
+
+    # # Set 'yvar' equal to GP:
+    
+    # # IF s IS NONE --> yvar not indexed by m.s; else is; etc.  ---> maybe two versions of constr.
+
+    # def _constr_yvar(mGP, t):
+    #     """Set 'yvar' equal to GP."""
+    #     return yvar[t] == mGP.y_avg[t]
+    
+    # mGP.constr_yvar = pyo.Constraint(m.t, rule=_constr_yvar)
+
+    # # Merge 'mGP' with global Pyomo model:
+    # if with_blocks is True:
+    #     m.add_component(f"GP{i}", mGP)
+
+    #     return m
+
+    # else:
+
+    #     return mGP
     
 
 
-    # -----------------
-    #TODO
-    #   - reproduce with s is None
-    #   - then try s (with all xvars as [m.t, m.s])
+    # # -----------------
+    # #TODO
+    # #   - reproduce with s is None
+    # #   - then try s (with all xvars as [m.t, m.s])
 
 
 
