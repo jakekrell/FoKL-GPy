@@ -521,6 +521,8 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
     elif i_td[-1][0] == True:
         m.add_component(f"GP{i}_y", pyo.Expression(t, GPi_draws, rule=_eq_y_1))
 
+    GPi_y = m.component(f"GP{i}_y")
+
     # Build GP expression for average of draws:
     
     def _eq_y_avg(t_ind=None, draw=None):
@@ -550,15 +552,15 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
     def _eq_y_avg_00(m):
         """GP equation average; no 't', no 'draws'."""
         return _eq_y_avg()
-    
+
     def _eq_y_avg_01(m, draw):
         """GP equation average; no 't', yes 'draws'."""
         return _eq_y_avg(draw=draw)
-    
+
     def _eq_y_avg_10(m, t_ind):
         """GP equation average; yes 't', no 'draws'."""
         return _eq_y_avg(t_ind)
-    
+
     def _eq_y_avg_11(m, t_ind, draw):
         """GP equation average; yes 't', yes 'draws'."""
         return _eq_y_avg(t_ind, draw)
@@ -574,32 +576,34 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
 
     GPi_y_avg = m.component(f"GP{i}_y_avg")
     
-    # Set 'yvar' equal to GP:
+    # Set 'yvar' constraint:
     
     def _constr_yvar_00(m):
         """Set 'yvar' equal to GP; no 't', no 'draws'."""
         return yvar == GPi_y_avg
-    
+
     def _constr_yvar_01(m, draw):
         """Set 'yvar' equal to GP; no 't', yes 'draws'."""
-        return yvar[draw] == GPi_y_avg[draw]
-    
+        return yvar[draw] == GPi_y[draw]
+
     def _constr_yvar_10(m, t_ind):
         """Set 'yvar' equal to GP; yes 't', no 'draws'."""
         return yvar[t_ind] == GPi_y_avg[t_ind]
-    
+
     def _constr_yvar_11(m, t_ind, draw):
         """Set 'yvar' equal to GP; yes 't', yes 'draws'."""
-        return yvar[t_ind, draw] == GPi_y_avg[t_ind, draw]
-    
-    if i_td[-1] == [False, False]:
-        m.add_component(f"GP{i}_constr", pyo.Constraint(rule=_constr_yvar_00))
-    elif i_td[-1] == [False, True]:
-        m.add_component(f"GP{i}_constr", pyo.Constraint(GPi_draws, rule=_constr_yvar_01))
-    elif i_td[-1] == [True, False]:
-        m.add_component(f"GP{i}_constr", pyo.Constraint(t, rule=_constr_yvar_10))
-    elif i_td[-1] == [True, True]:
-        m.add_component(f"GP{i}_constr", pyo.Constraint(t, GPi_draws, rule=_constr_yvar_11))
+        return yvar[t_ind, draw] == GPi_y[t_ind, draw]
+
+    if i_td[-1][1] is False:  # no 'draws'
+        if i_td[-1][1] is False:  # no 't'
+            m.add_component(f"GP{i}_constr", pyo.Constraint(rule=_constr_yvar_00))
+        else:  # yes 't'
+            m.add_component(f"GP{i}_constr", pyo.Constraint(t, rule=_constr_yvar_10))
+    else:  # yes 'draws'
+        if i_td[-1][1] is False:  # no 't'
+            m.add_component(f"GP{i}_constr", pyo.Constraint(GPi_draws, rule=_constr_yvar_01))
+        else:  # yes 't'
+            m.add_component(f"GP{i}_constr", pyo.Constraint(t, GPi_draws, rule=_constr_yvar_11))
 
     return m
 

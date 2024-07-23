@@ -61,7 +61,7 @@ def gradient_h4(x, h):
     return dx
 
 
-def main():
+def main(INDEX_SCENARIOS):
     # Load data:
     data = pd.read_csv(os.path.join(dir, "data", "v11_training_data.csv"))
     tvec = data["t"]
@@ -98,32 +98,51 @@ def main():
 
     m = pyo.ConcreteModel("TCLab Heater with GP Model")
     m.t = dae.ContinuousSet(bounds=(t0, tf))
+    m.u = pyo.Var(m.t, bounds=(0, 100))
 
-    m.s = pyo.Set(initialize=range(draws))  # scenarios
+    if INDEX_SCENARIOS:
 
-    m.T = pyo.Var(m.t, m.s, bounds=GP.minmax[0])  # == T - Tamb
-    m.u = pyo.Var(m.t, bounds=(0, 100))  # same across scenarios
+        m.s = pyo.Set(initialize=range(draws))  # scenarios
+        m.T = pyo.Var(m.t, m.s, bounds=GP.minmax[0])  # == T - Tamb
+        m.dT = dae.DerivativeVar(m.T, wrt=m.t)
 
-    m.dT = dae.DerivativeVar(m.T, wrt=m.t)
+        for s in m.s:
+            m.T[t0, s].fix(0.0)  # initial condition
+        m.u[t0].fix(0.0)
 
-    for s in m.s:
-        m.T[t0, s].fix(0.0)  # initial condition, t=0
+        GP.to_pyomo([m.T, m.u], m.dT, m, m.t, m.s)
 
-    GP.to_pyomo([m.T, m.u], m.dT, m, m.t, m.s)
+        # Integral of squared error:
+        @m.Integral(m.t, m.s, wrt=m.t)
+        def ise(m, t, s):
+            return (r(t) - m.T[t, s]) ** 2
+
+        # Define the objective function:
+        @m.Objective(sense=pyo.minimize)
+        def objective(m):
+            return pyo.summation(m.ise)  # == sum(m.ise[s] for s in m.s)
+
+    else:
+
+        m.T = pyo.Var(m.t, bounds=GP.minmax[0])  # == T - Tamb
+        m.dT = dae.DerivativeVar(m.T, wrt=m.t)
+
+        m.T[t0].fix(0.0)  # initial condition
+        m.u[t0].fix(0.0)
+
+        GP.to_pyomo([m.T, m.u], m.dT, m, m.t)
+
+        @m.Integral(m.t, wrt=m.t)
+        def ise(m, t):
+            return (r(t) - m.T[t]) ** 2
+
+        @m.Objective(sense=pyo.minimize)
+        def objective(m):
+            return m.ise
 
     # Prepare Pyomo solver:
     solver = pyo.SolverFactory('ipopt')
     solver.options['linear_solver'] = 'ma57'
-
-    # Integral of squared error:
-    @m.Integral(m.t, m.s, wrt=m.t)
-    def ise(m, t, s):
-        return (r(t) - m.T[t, s]) ** 2
-
-    # Define the objective function:
-    @m.Objective(sense=pyo.minimize)
-    def objective(m):
-        return sum(m.ise[s] for s in m.s)
 
     # Apply a collocation method to numerically integrate the differential equations
     pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=100, wrt=m.t)
@@ -131,9 +150,20 @@ def main():
     # Call our nonlinear optimization/equation solver, Ipopt
     solver.solve(m, tee=True)
 
+    # Plot and save solution:
+    plt.figure()
+    if INDEX_SCENARIOS:
+        for s in m.s:
+            plt.plot(np.array(m.t), np.array(m.T[:, s]()))
+    else:
+        plt.plot(np.array(m.t), np.array(m.T[:]()))
+    plt.plot(np.array(m.t), np.array(m.u[:]()))
+    plt.show()
+
     return
 
 
 if __name__ == '__main__':
-    main()
+    INDEX_SCENARIOS = False
+    main(INDEX_SCENARIOS)
 
