@@ -11,8 +11,8 @@ dir = os.path.abspath('')  # directory of notebook
 import sys
 sys.path.append(os.path.join(dir, '..', '..'))  # package directory
 from src.FoKL import FoKLRoutines
+from src.FoKL.fokl_to_pyomo import fokl_to_pyomo
 import numpy as np
-from scipy.interpolate import interp1d
 import matplotlib.pyplot as plt
 import pandas as pd
 import pyomo.environ as pyo
@@ -110,7 +110,7 @@ def main(INDEX_SCENARIOS):
             m.T[t0, s].fix(0.0)  # initial condition
         m.u[t0].fix(0.0)
 
-        GP.to_pyomo([m.T, m.u], m.dT, m, m.t, m.s)
+        fokl_to_pyomo(GP, [m.T, m.u], m.dT, m, m.t, m.s)
 
         # Integral of squared error:
         @m.Integral(m.t, m.s, wrt=m.t)
@@ -122,6 +122,9 @@ def main(INDEX_SCENARIOS):
         def objective(m):
             return pyo.summation(m.ise)  # == sum(m.ise[s] for s in m.s)
 
+        m.GP0_constr.deactivate()
+        m.GP0_constr[:, 0].activate()  # activate first scenario only, as not all constraints can be satisfied
+
     else:
 
         m.T = pyo.Var(m.t, bounds=GP.minmax[0])  # == T - Tamb
@@ -130,7 +133,7 @@ def main(INDEX_SCENARIOS):
         m.T[t0].fix(0.0)  # initial condition
         m.u[t0].fix(0.0)
 
-        GP.to_pyomo([m.T, m.u], m.dT, m, m.t)
+        fokl_to_pyomo(GP, [m.T, m.u], m.dT, m, m.t)
 
         @m.Integral(m.t, wrt=m.t)
         def ise(m, t):
@@ -140,9 +143,12 @@ def main(INDEX_SCENARIOS):
         def objective(m):
             return m.ise
 
+    # =================================================================
+    # SOLUTION:
+
     # Prepare Pyomo solver:
     solver = pyo.SolverFactory('ipopt')
-    solver.options['linear_solver'] = 'ma57'
+    # solver.options['linear_solver'] = 'ma57'
 
     # Apply a collocation method to numerically integrate the differential equations
     pyo.TransformationFactory('dae.collocation').apply_to(m, nfe=100, wrt=m.t)
@@ -153,7 +159,7 @@ def main(INDEX_SCENARIOS):
     # Plot and save solution:
     plt.figure()
     if INDEX_SCENARIOS:
-        for s in m.s:
+        for s in [0]:  # m.s:
             plt.plot(np.array(m.t), np.array(m.T[:, s]()))
     else:
         plt.plot(np.array(m.t), np.array(m.T[:]()))
@@ -164,6 +170,6 @@ def main(INDEX_SCENARIOS):
 
 
 if __name__ == '__main__':
-    INDEX_SCENARIOS = False
+    INDEX_SCENARIOS = True
     main(INDEX_SCENARIOS)
 

@@ -523,56 +523,28 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
 
     GPi_y = m.component(f"GP{i}_y")
 
-    # Build GP expression for average of draws:
-    
-    def _eq_y_avg(t_ind=None, draw=None):
-        """GP equation average."""
-        y = GPi_beta_avg[0]  # initialize
-        
-        for term in range(1, len(GPi_terms)):  # == GPi_terms[1::]
-            y_term = GPi_beta_avg[term]
+    # Average scenarios, i.e., 'draws':
 
-            for j in GPi_attributes:
-                n = mtx[term - 1, j]
+    def _eq_y_avg_0(m):
+        """Average of draws, i.e., scenarios; no 't'."""
+        y_avg = 0
+        for draw in GPi_draws:
+            y_avg += GPi_y[draw]
+        y_avg *= 1 / len(GPi_draws)
+        return y_avg
 
-                if n != 0:  # since 0 means none
-                    if i_td[j] == [False, False]:
-                        y_term *= GPi_phi[j][n]
-                    elif i_td[j] == [False, True]:
-                        y_term *= GPi_phi[j][draw, n]
-                    elif i_td[j] == [True, False]:
-                        y_term *= GPi_phi[j][t_ind, n]
-                    elif i_td[j] == [True, True]:
-                        y_term *= GPi_phi[j][t_ind, draw, n]
+    def _eq_y_avg_1(m, t_ind):
+        """Average of draws, i.e., scenarios; yes 't'."""
+        y_avg = 0
+        for draw in GPi_draws:
+            y_avg += GPi_y[t_ind, draw]
+        y_avg *= 1 / len(GPi_draws)
+        return y_avg
 
-            y += y_term
-
-        return y
-    
-    def _eq_y_avg_00(m):
-        """GP equation average; no 't', no 'draws'."""
-        return _eq_y_avg()
-
-    def _eq_y_avg_01(m, draw):
-        """GP equation average; no 't', yes 'draws'."""
-        return _eq_y_avg(draw=draw)
-
-    def _eq_y_avg_10(m, t_ind):
-        """GP equation average; yes 't', no 'draws'."""
-        return _eq_y_avg(t_ind)
-
-    def _eq_y_avg_11(m, t_ind, draw):
-        """GP equation average; yes 't', yes 'draws'."""
-        return _eq_y_avg(t_ind, draw)
-
-    if i_td[-1] == [False, False]:
-        m.add_component(f"GP{i}_y_avg", pyo.Expression(rule=_eq_y_avg_00))
-    elif i_td[-1] == [False, True]:
-        m.add_component(f"GP{i}_y_avg", pyo.Expression(GPi_draws, rule=_eq_y_avg_01))
-    elif i_td[-1] == [True, False]:
-        m.add_component(f"GP{i}_y_avg", pyo.Expression(t, rule=_eq_y_avg_10))
-    elif i_td[-1] == [True, True]:
-        m.add_component(f"GP{i}_y_avg", pyo.Expression(t, GPi_draws, rule=_eq_y_avg_11))
+    if i_td[-1][0] == False:  # no 't'
+        m.add_component(f"GP{i}_y_avg", pyo.Expression(rule=_eq_y_avg_0))
+    elif i_td[-1][0] == True:  # yes 't'
+        m.add_component(f"GP{i}_y_avg", pyo.Expression(t, rule=_eq_y_avg_1))
 
     GPi_y_avg = m.component(f"GP{i}_y_avg")
     
@@ -595,15 +567,23 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas
         return yvar[t_ind, draw] == GPi_y[t_ind, draw]
 
     if i_td[-1][1] is False:  # no 'draws'
-        if i_td[-1][1] is False:  # no 't'
+        if i_td[-1][0] is False:  # no 't'
             m.add_component(f"GP{i}_constr", pyo.Constraint(rule=_constr_yvar_00))
         else:  # yes 't'
             m.add_component(f"GP{i}_constr", pyo.Constraint(t, rule=_constr_yvar_10))
     else:  # yes 'draws'
-        if i_td[-1][1] is False:  # no 't'
+        if i_td[-1][0] is False:  # no 't'
             m.add_component(f"GP{i}_constr", pyo.Constraint(GPi_draws, rule=_constr_yvar_01))
         else:  # yes 't'
             m.add_component(f"GP{i}_constr", pyo.Constraint(t, GPi_draws, rule=_constr_yvar_11))
 
     return m
+
+# RTW:
+#
+#   - LIKELY MAKE NO 'draws' YIELD 'beta_avg' PARAM, WHICH IS USED DIRECTLY IN Y_AVG GP EXPRESSION; CORRESPONDING CONSTR
+#       - ELSE, 'draws' DOES NOT YIELD 'beta_avg' NOR 'y_avg'; CONSTR INDEXED BY 'draws'
+#       - ALSO, NO 'draws' MAY SKIP 'y' EXPRESSIONS IN FAVOR OF 'y_avg' ONLY
+
+
 
