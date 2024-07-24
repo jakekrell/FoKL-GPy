@@ -14,576 +14,336 @@ from pyomo.environ import *
 import warnings
 
 
-# Internal functions:
-
-def _process_arguments(self, xvars, yvar, m, draws, t_span, mtx, betas, minmax):
-    """Process/format input arguments for 'to_pyomo' method."""
-    if m is None:
-        m = pyo.ConcreteModel('Global')
-
-    if m.find_component('t') is None:
-        if t_span is None:  # ODE not requested, so single index to avoid if-else statements in internal code
-            m.t = pyo.Set(initialize=range(1))
-        elif isinstance(t_span, list):
-            m.t = dae.ContinuousSet(bounds=t_span)
-        else:
-            raise ValueError("Argument 't_span' must be a list of integration bounds.")
-    elif t_span is not None:
-        warnings.warn("Ignoring argument 't_span' because 'm.t' is already defined.", category=UserWarning)
-
-    if not isinstance(xvars, list):  # if not list, make list
-        xvars = [xvars]
-    if isinstance(yvar, list):  # if list, make not list
-        yvar = yvar[0]
-
-    if minmax is None:
-        minmax = self.minmax
-        
-    j = -1
-    for xvar in xvars:
-        j += 1
-        if isinstance(xvar, str):  # else pre-defined Pyomo component, so ignore
-            m.add_component(xvar, pyo.Var(m.t, domain=pyo.Reals, bounds=minmax[j]))
-            xvars[j] = m.component(xvar)
-
-    if isinstance(yvar, str):  # else pre-defined Pyomo component, so ignore
-        m.add_component(yvar, pyo.Var(m.t, domain=pyo.Reals))
-        yvar = m.component(yvar)
-
-    if draws is None:
-        draws = self.draws
-
-    if mtx is None:
-        mtx = self.mtx
-
-    if betas is None:
-        betas = self.betas
-
-    return self, xvars, yvar, m, draws, t_span, mtx, betas, minmax
-
-
-def _gp_as_pyomo(name, tvec, phis, draws, mtx, betas, xvars, minmax, model=None, scenarios=None):
-    """tvec == m.t"""
-    # Initialize sub-model for GP:
-    if model is None:
-        mGP = pyo.ConcreteModel(name)
-        _with_block = True
-    else:
-        mGP = model
-        _with_block = False
-
-    # Some constants:
-    mtx = np.array(mtx, dtype=int)  # indices/orders of basis functions (where 1 is B1 and 0 means none)
-
-    # Some sets:
-    mGP.terms = pyo.Set(initialize = range(mtx.shape[0] + 1))  # terms (including beta0)
-    mGP.orders = pyo.Set(initialize = np.unique(mtx[mtx != 0]))  # orders of basis functions
-    mGP.attributes = pyo.Set(initialize = range(mtx.shape[1]))  # input variables
-    if scenarios is not None:
-        if len(scenarios) == draws:
-            raise NotImplementedError("Currently, length of 'scenarios' must equal 'draws'. In other words, 'scenarios' must index each of FoKL's 'draws'.")
-        mGP.draws = scenarios  # using 'scenarios' instead of 'range(draws)' allows 'm.s' to be strings, etc.
-    else:  # if 'scenarios' is None
-        mGP.draws = pyo.Set(initialize = range(draws))
-
-    # if len(scenarios) == 1 or scenarios is None:  # then average draws into single Pyomo scenario
-    # elif len(scenarios) == draws:  # then each draw is scenario
-    # else:
-    #     raise NotImplementedError()
-
-    # COMMENTS:
-    #   - if s None
-    #       - m.s_temp = range(1)  # placeholder index
-    #   - if len(s or m.s_temp) == 1  # (and draws != 1 ... else require draws > 1)
-    #       - avg draws into single scenario
-    #   - elif len(s) == draws
-    #       - then each draw is scenario
-    #   - else not implemented
-
-    # ================
-    # RTW:
-
-
-    # Define beta coefficients:
-    mGP.beta = pyo.Param(mGP.draws, mGP.terms, mutable=True)  # mutable=True, to change the value dynamically
-    mGP.beta_avg = pyo.Param(mGP.terms, mutable=True)
-    fix_betas(mGP, betas)
-
-    # Define expression of normalized attributes (i.e., input variables):
-    
-    # TWO VERSIONS OF EQ_NORM / OR SWITCH CASE IN SINGLE FUNC:
-
-    def _eq_norm(mGP, t, j):
-        """Normalization constraint. (scenarios is None) ... modify slightly to index m.s_temp==1"""
-        return (xvars[j][t] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
-    
-    def _eq2_norm(mGP, t, j):
-        """Normalization constraint. (scenarios is not None) ... index xvars by m.s"""
-        return (xvars[j][t] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
-
-    # mGP.x = pyo.Expression(tvec, mGP.attributes, rule=_eq_norm)
-    mGP.x = pyo.Expression(tvec, scenarios, mGP.attributes, rule=_eq_norm)
-
-    # ===================================================================
-    # Define polynomials (i.e., "basis" functions):
-    
-    nj = []  # list of [order, attribute] combinations used in GP
-    for attribute in mGP.attributes:
-        orders_j = np.unique(mtx[:, attribute])
-        if any(orders_j != 0):
-            for order_j in orders_j[orders_j != 0]:
-                nj.append([order_j, attribute])
-    
-    # X NEEDS TO BE INDEXED BY m.s
-
-    def _eq_phi(mGP, t, n, j):
-        """FoKL's 'basis' functions."""
-        nm1 = n - 1  # Python indexing, since n=1 refers to B1 which is phis[0]
-        return phis[nm1][0] + sum(phis[nm1][k] * mGP.x[t, j] ** k for k in range(1, len(phis[nm1])))
-
-    # INDEX BY m.s
-
-    mGP.phi = pyo.Expression(tvec, nj, rule=_eq_phi)
-
-    # ===================================================================
-    # Build GP expression:
-
-    # Draws:
-
-    # CONSIDER AVERAGING ALL TO PLACE IN SINGLE SCENARIO, OR EACH DRAW IN EACH SCENARIO (IN WHICH CASE NO Y_AVG NEEDED)
-
-    def _eq_y(mGP, t, draw):
-        """FoKL's GP equation."""
-        y = mGP.beta[draw, 0]  # initialize
-        
-        for term in range(1, len(mGP.terms)):  # == m.terms[1::]
-            y_term = mGP.beta[draw, term]
-
-            for j in mGP.attributes:
-                n = mtx[term - 1, j]
-
-                if n != 0:  # since 0 means none
-                    y_term *= mGP.phi[t, n, j]
-
-            y += y_term
-
-        return y
-
-    mGP.y = pyo.Expression(tvec, mGP.draws, rule=_eq_y)
-
-    # Average (IGNORE FOR NOW BECAUSE m.s):
-
-    # def _eq_y_avg(mGP, t):
-    #     """FoKL's GP equation, averaged across draws."""
-    #     y = mGP.beta_avg[0]  # initialize
-        
-    #     for term in range(1, len(mGP.terms)):  # == m.terms[1::]
-    #         y_term = mGP.beta_avg[term]
-
-    #         for j in mGP.attributes:
-    #             n = mtx[term - 1, j]
-
-    #             if n != 0:  # since 0 means none
-    #                 y_term *= mGP.phi[t, n, j]
-
-    #         y += y_term
-
-    #     return y
-
-    # mGP.y_avg = pyo.Expression(tvec, rule=_eq_y_avg)
-
-    # Standard deviation (IGNORE FOR NOW):
-
-    # def _eq_y_std(mGP, t):
-    #     """Standard deviation of draws from FoKL's GP equation."""
-    #     return sqrt(sum(mGP.y[t, draw] ** 2 for draw in mGP.draws) / len(mGP.draws) + 1e-9)
-
-    # mGP.y_std = pyo.Expression(tvec, rule=_eq_y_std)
-
-    return mGP
-
-
-# End internal functions.
-# =============================================================================================================
-# =============================================================================================================
-# =============================================================================================================
-# =============================================================================================================
-# Module functions:
-
-def fix_betas(m, betas, GPi_draws=None, i=0):
+def fix_betas(m, betas, i=0, scenarios=None):
     """
-    Fix the already-initialized Pyomo beta Param's to scalar values in 'betas', using last 'betas' draw as first Pyomo draw. Include average.
+    Fix the already-initialized Pyomo beta Param's to scalar values.
     
-    | Argument  | Type          | Description                                     |
-    |-----------|---------------|-------------------------------------------------|
-    | m         | ConcreteModel | Pyomo model containing embedded GP              |
-    | betas     | ndarray       | [draws x terms] beta coefficients of FoKL model |
-    | GPi_draws | Set           | index of 'm.GP{i}_beta[draws, terms]'           |
-    | i         | int           | index of GP to update                           |
-    
-    | Output | Type          | Description                                  |
-    |--------|---------------|----------------------------------------------|
-    | m      | ConcreteModel | Pyomo model with 'm.GP{i}_beta' values fixed |
+    | Argument  | Type    | Description                         |
+    |-----------|---------|-------------------------------------|
+    | m         | -       | see 'fokl_to_pyomo'                 |
+    | betas     | ndarray | shape is (draws, terms) or (terms,) |
+    | i         | int     | index of next available GP in 'm'   |
+    | scenarios | -       | see 'fokl_to_pyomo'                 |
 
     """
-    if GPi_draws is None:
-        GPi_draws = m.component(f"GP{i}_draws")
+    beta = m.component(f"GP{i}_beta")
+    terms = m.component(f"GP{i}_terms")
+    
+    if betas.ndim == 1:  # format (n,) to (1,n)
+        betas = betas[np.newaxis, :]
 
-    i_draw = -1  # index of draw (to index betas ndarray)
-    for draw in GPi_draws:
-        i_draw += 1
-        for term in m.component(f"GP{i}_terms"):
-            m.component(f"GP{i}_beta")[draw, term] = betas[-(i_draw + 1), term]
+    if len(beta.index_set()) == betas.shape[1]:  # then 'beta[term]' == average of 'betas'
+        if scenarios is not None:
+            warnings.warn("Ignoring 'scenarios'.", category=UserWarning)
+        beta_avg = np.mean(betas, axis=0)
+        for term in terms:
+            beta[term] = beta_avg[term]
+
+    else:  # then 'beta[s, term]' == 'betas[-(s + 1), term]'; i.e., most recent draws
+        if scenarios is None:
+            raise ValueError("'scenarios' must be passed to 'fix_betas' if used to index 'm.GP#_beta'.")
+        s_ind = 0
+        for s in scenarios:
+            s_ind += 1
+            for term in terms:
+                beta[s, term] = betas[-(s_ind + 1), term]
 
     return m
 
 
-def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, draws=None, mtx=None, betas=None, minmax=None):
+def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
     """
     Convert GP model from FoKL class to Pyomo model.
     
-    | Arg.   | Type                             | Description                                                                                                                                          | Default           |
-    |--------|----------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------|
-    | self   | FoKL class                       | FoKL class object with Bernoulli Polynomials kernel, 'FoKLRoutines.FoKL(kernel=1)'                                                                   | -                 |
-    | xvars  | list of Pyomo component(s)       | list of GP input variable(s), i.e., attributes; can be pyo.Var, dae.DerivativeVar, etc.; when defining, index by 't' and/or 'draws' where applicable | -                 |
-    | yvar   | Pyomo component                  | GP output variable; behaves like 'xvars'                                                                                                             | -                 |
-    | m      | Pyomo model                      | pre-defined Pyomo model                                                                                                                              | pyo.ConcreteModel |
-    | t      | dae.ContinuousSet                | index for integration time to achieve ODE functionality, i.e., 't = dae.ContinuousSet(bounds=[t0, tf])'                                              | None              |
-    | draws  | int or pyo.Set                   | number of GP draws to embed in Pyomo, or Set indexing draws                                                                                          | self.draws        |
-    | mtx    | ndarray [terms - 1 x attributes] | GP's interaction matrix                                                                                                                              | self.mtx          |
-    | betas  | ndarray [draws x terms]          | GP's coefficients                                                                                                                                    | self.betas        |
-    | minmax | list of lists of two floats      | GP's normalization of input variables [[min, max], ..., [min, max]]                                                                                  | self.minmax       |
-    
-    | Output | Type        | Description                                        |
-    |--------|-------------|----------------------------------------------------|
-    | m      | Pyomo model | input argument 'm' with 'self' embedded as 'm.GP#' |
-    
-    Reserved Pyomo components:
-        - 'm.GP#', where # is integer index of GP beginning at 0; reservation includes all 'm.GP#_{str}' components too
-        
-    Tips:
-        - 'xvars' gets bounded by 'minmax' of FoKL model 'self';
-          this is not technically required since the GP is a polynomial, but is recommended because the GP is not intended to extrapolate.
-            - 'm.[xvars[j]].setlb(GP.minmax[j][0])'
-            - 'm.[xvars[j]].setub(GP.minmax[j][1])'
-        - 'yvar' indices are [t, draws] if passing in Pyomo components for 't', 'draws'; 'xvars' indices are assumed to be either [t], [draws], [t, draws], or none
-    
+    | Argument  | Type                    | Description |
+    |-----------|-------------------------|-------------|
+    | xvars     | str, Var, DerivativeVar |             |
+    | yvar      | str, Var, DerivativeVar |             |
+    | m         | ConcreteModel           |             |
+    | t         | ContinuousSet           |             |
+    | scenarios | Set                     |             |
+
     """
-    # Process defaults:
+    # Pre-processing:
+    i = 0  # index of next available GP (in case Pyomo model contains multiple GPs)
     if m is None:
         m = pyo.ConcreteModel("FoKL-to-Pyomo Model")
-    if draws is None:
-        draws = self.draws
-    if mtx is None:
-        mtx = self.mtx
-    if betas is None:
-        betas = self.betas
-    if minmax is None:
-        minmax = self.minmax
+    else:
+        while m.find_component(f"GP{i}") is not None:
+            i += 1
+    s = scenarios  # rename
     
     # Check for type errors:
     if not isinstance(xvars, list):
         raise TypeError()
-    for xvar in xvars:
-        if not any(isinstance(xvar, type) for type in [pyo.Var, dae.DerivativeVar]):
+    elif len(xvars) != self.mtx.shape[1]:
+        raise ValueError("'xvars' must have an element for each FoKL model training input.")
+    _CREATE_VARS = False
+    for var in xvars + [yvar]:
+        if not any(isinstance(var, type) for type in [str, pyo.Var, dae.DerivativeVar]):
             raise TypeError()
-    if not any(isinstance(yvar, type) for type in [pyo.Var, dae.DerivativeVar]):
-        raise TypeError()
+        elif isinstance(var, str):
+            _CREATE_VARS = True  # str received, so need to create Var
     if not isinstance(m, pyo.ConcreteModel):
         raise TypeError()
     if not (t is None or isinstance(t, dae.ContinuousSet)):
         raise TypeError()
-    if not any(isinstance(draws, type) for type in [int, pyo.Set]):
+    if not (s is None or isinstance(s, pyo.Set)):
         raise TypeError()
-    if not isinstance(mtx, np.ndarray):
-        raise TypeError()
-    if not isinstance(betas, np.ndarray):
-        raise TypeError()
-    if not isinstance(minmax, list):
-        raise TypeError()
-    for minmax_i in minmax:
-        if not isinstance(minmax_i, list):
-            raise TypeError()
-        if not any(isinstance(minmax_i[i], float) for i in range(2)):
-            raise TypeError()
 
-    # Warn about index assumptions regarding time ('t') and/or scenarios ('draws'):
-    for var in [yvar] + xvars:
-        if var.dim() > 2:
-            raise NotImplementedError("Pyomo variables indexed by more than time ('t') and scenarios ('draws') are not supported.")
-    td = [isinstance(t, dae.ContinuousSet), isinstance(draws, pyo.Set)]
-    i_td = [[False, False]] * (1 + len(xvars))  # boolean array for how each variable in 'xvars + [yvar]' gets indexed; corresponds to ['t', 'draws'] indices
-    if all(td):
-        warnings.warn(f"Assuming '{yvar.name}' indexed by ['{t.name}', '{draws.name}'].", category=SyntaxWarning)
-        i_td[-1] = [True, True]  # yvar indexed by ['t', 'draws']
-        _warn_equal_len = True
-        i = -1
-        for xvar in xvars:
-            i += 1
-            if xvar.dim() == 2:
-                warnings.warn(f"Assuming '{xvar.name}' indexed by ['{t.name}', '{draws.name}'].", category=SyntaxWarning)
-                i_td[i] = [True, True]  # xvar indexed by ['t', 'draws']
-            elif xvar.dim() == 1:
-                if len(t) == len(draws):
-                    if _warn_equal_len:
-                        warnings.warn(f"Pyomo sets '{t.name}' and '{draws.name}' are indistinguishable due to equal length; assuming '{t.name}' as the index for variables with one dimension.", category=SyntaxError)
-                    _warn_equal_len = False
-                if len(xvar) == len(t):
-                    warnings.warn(f"Assuming '{xvar.name}' indexed by '{t.name}'.", category=SyntaxWarning)
-                    i_td[i][0] = True  # xvar indexed by 't'
-                elif len(xvar) == len(draws):
-                    warnings.warn(f"Assuming '{xvar.name}' indexed by '{draws.name}'.", category=SyntaxWarning)
-                    i_td[i][1] = True  # xvar indexed by 'draws'
+    # Pre-processing (cont.):
+
+    jj = len(xvars)
+    m.add_component(f"GP{i}_attributes", pyo.Set(initialize=range(jj)))   # indices of input variables
+    attributes = m.component(f"GP{i}_attributes")
+
+    if t is None and s is None:
+        ts = None  # Pyomo indices
+    elif t is None:
+        ts = s
+    elif s is None:
+        ts = t
+    else:
+        ts = [t, s]
+    
+    if _CREATE_VARS:  # create Var for str in [xvars, yvar]
+        for j in attributes:
+            if isinstance(xvars[j], str):
+                if ts is None:
+                    xvars[j] = pyo.Var(bounds=self.minmax[j])
                 else:
-                    raise NotImplementedError(f"'{xvar.name}' may only be indexed by '{t.name}' and/or '{draws.name}'.")
+                    xvars[j] = pyo.Var(ts, bounds=self.minmax[j])
+        if isinstance(yvar, str):
+            if ts is None:
+                yvar = pyo.Var()
             else:
-                warnings.warn(f"Assuming '{xvar.name}' not indexed.", category=SyntaxWarning)
-    elif td[0]:
-        warnings.warn(f"Assuming '{yvar.name}' indexed by '{t.name}'.", category=SyntaxWarning)
-        i_td[-1][0] = True  # yvar indexed by 't'
-        i = -1
-        for xvar in xvars:
-            i += 1
-            if xvar.dim() == 1:
-                warnings.warn(f"Assuming '{xvar.name}' indexed by '{t.name}'.", category=SyntaxWarning)
-                i_td[i][0] = True  # xvar indexed by 't'
-            else:
-                warnings.warn(f"Assuming '{xvar.name}' not indexed.", category=SyntaxWarning)
-    elif td[1]:
-        warnings.warn(f"Assuming '{yvar.name}' indexed by '{draws.name}'.", category=SyntaxWarning)
-        i_td[-1][1] = True  # yvar indexed by 'draws'
-        i = -1
-        for xvar in xvars:
-            i += 1
-            if xvar.dim() == 1:
-                warnings.warn(f"Assuming '{xvar.name}' indexed by '{draws.name}'.", category=SyntaxWarning)
-                i_td[i][1] = True  # xvar indexed by 'draws'
-            else:
-                warnings.warn(f"Assuming '{xvar.name}' not indexed.", category=SyntaxWarning)
+                yvar = pyo.Var(ts)
+    vars = xvars + [yvar]
 
-    # Find next available GP index:
-    i = 0
-    while m.find_component(f"GP{i}") is not None:
-        i += 1
+    dims = 0  # number of dimensions; i.e., 1 if 't' or 'scenarios', 2 if both
+    if ts is None:
+        ts = [None] * (jj + 1)  # +1 to include yvar
+        switch = np.zeros_like(ts, dtype=int)
+    else:
+        ts = []
+        switch = []  # switch case; 0 for None, 1 for s, 2 for t, 3 for [t, s]
+
+        def _index_error(_index):
+            return ValueError(f"Length of 'xvars[{j}]' failed to match length of '{_index}'. Ensure the variable is not indexed by another set, and remove all indices if 'xvars[{j}]' should not be indexed by '{_index}'.")
+
+        lt, ls = 1, 1
+        if t is not None:
+            lt = len(t)
+            dims += 1
+        if s is not None:
+            ls = len(s)
+            dims += 1
+        if dims == 2:
+            if lt == ls:
+                raise ValueError("Lengths of 't' and 'scenarios' must be unique.")
+            ltxls = int(lt * ls)
+
+        for j in range(jj + 1):
+            nd = vars[j].dim()  # number of dimensions, i.e., of indices
+            lv = len(vars[j].index_set())  # length of variable
+
+            if nd > dims:
+                raise NotImplementedError("'xvars' and 'yvar' indexed by more than 't' and/or 'scenarios' is not supported.")
+            elif nd == 0:
+                ts.append(None)
+                switch.append(0)
+            elif nd == 1:
+                if dims == 1:
+                    if t is None:
+                        if lv != ls:
+                            raise _index_error("scenarios")
+                        ts.append(s)
+                        switch.append(1)
+                    elif s is None:
+                        if lv != lt:
+                            raise _index_error("t")
+                        ts.append(t)
+                        switch.append(2)
+                else:
+                    if lv == ls:
+                        ts.append(s)
+                        switch.append(1)
+                    elif lv == lt:
+                        ts.append(t)
+                        switch.append(2)
+                    else:
+                        raise ValueError(f"Index of 'xvars[{j}]' failed to be inferred from length because it is not equal to length of 't' nor 'scenarios'.")
+            elif nd == 2:
+                if lv != ltxls:
+                    raise _index_error("[t, scenarios]")
+                ts.append([t, s])
+                switch.append(3)
+    
+    if t is not None and not any(switch[j] == ft for ft in [2, 3] for j in range(lv)):  # user passed 't' but no variables are indexed by 't'
+        warnings.warn("Ignoring 't' as no 'xvars' nor 'yvar' appear to be indexed by 't'.", category=UserWarning)
+        t = None
 
     # Some constants:
-    mtx = np.array(mtx, dtype=int)  # indices/orders of basis functions (where 1 is B1 and 0 means none)
+    mtx = np.array(self.mtx, dtype=int)  # indices/orders of basis functions (where 1 is B1 and 0 means none)
 
     # Some sets:
     m.add_component(f"GP{i}_terms", pyo.Set(initialize = range(mtx.shape[0] + 1)))    # terms (including beta0)
-    m.add_component(f"GP{i}_attributes", pyo.Set(initialize = range(mtx.shape[1])))   # indices of input variables
-    if isinstance(draws, int):
-        m.add_component(f"GP{i}_draws", pyo.Set(initialize = range(draws)))           # draws (via int)
-        GPi_draws = m.component(f"GP{i}_draws")
-    else:
-        GPi_draws = draws                                                             # draws (via pre-defined scenarios, i.e., 'draws' Set); could be str's, etc.
-    GPi_terms = m.component(f"GP{i}_terms")
-    GPi_attributes = m.component(f"GP{i}_attributes")
+    terms = m.component(f"GP{i}_terms")
 
     # Define beta coefficients:
-    m.add_component(f"GP{i}_beta", pyo.Param(GPi_draws, GPi_terms, mutable=True))  # 'mutable=True', to change the values dynamically
-    GPi_beta = m.component(f"GP{i}_beta")
-
-    # Average beta coefficients:
-    
-    def _beta_avg(m, term):
-        """Average beta Param's rather than 'yvar' Expression's to yield faster Pyomo solutions.
-        Defining a 'beta_avg' Param would be faster and would not require 'yvar' draws, though this optional feature is left for future development."""
-        return sum(GPi_beta[draw, term] for draw in GPi_draws) / len(GPi_draws)
-    
-    m.add_component(f"GP{i}_beta_avg", pyo.Expression(GPi_terms, rule=_beta_avg))    
-    GPi_beta_avg = m.component(f"GP{i}_beta_avg")
-    
-    fix_betas(m, betas, GPi_draws)
+    if s is not None:
+        sterms = [s, terms]  # index betas by scenarios
+    else:
+        sterms = terms
+    m.add_component(f"GP{i}_beta", pyo.Param(sterms, mutable=True))  # 'mutable=True', to change the values dynamically
+    fix_betas(m, self.betas, i, s)
+    beta = m.component(f"GP{i}_beta")
 
     # Normalize attributes:
 
-    def _eq_norm_00(m):
-        """Normalization constraint; no 't', no 'draws')."""
-        return (xvars[j] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+    def _normalize(x, minmax):
+        """Normalization constraint."""
+        return (x - minmax[0]) / (minmax[1] - minmax[0])
 
-    def _eq_norm_01(m, draw):
-        """Normalization constraint; no 't', yes 'draws'."""
-        return (xvars[j][draw] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+    def _eq_norm_00(m):
+        return _normalize(xvars[j], self.minmax[j])
+
+    def _eq_norm_01(m, s_ind):
+        return _normalize(xvars[j][s_ind], self.minmax[j])
 
     def _eq_norm_10(m, t_ind):
-        """Normalization constraint; yes 't', no 'draws'."""
-        return (xvars[j][t_ind] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+        return _normalize(xvars[j][t_ind], self.minmax[j])
 
-    def _eq_norm_11(m, t_ind, draw):
-        """Normalization constraint; yes 't', yes 'draws'."""
-        return (xvars[j][t_ind, draw] - minmax[j][0]) / (minmax[j][1] - minmax[j][0])
+    def _eq_norm_11(m, t_ind, s_ind):
+        return _normalize(xvars[j][t_ind, s_ind], self.minmax[j])
+    
+    _eq_norm = [_eq_norm_00, _eq_norm_01, _eq_norm_10, _eq_norm_11]
 
-    for j in GPi_attributes:
-        if i_td[j] == [False, False]:
-            m.add_component(f"GP{i}_x{j}", pyo.Expression(rule=_eq_norm_00))
-        elif i_td[j] == [False, True]:
-            m.add_component(f"GP{i}_x{j}", pyo.Expression(GPi_draws, rule=_eq_norm_01))
-        elif i_td[j] == [True, False]:
-            m.add_component(f"GP{i}_x{j}", pyo.Expression(t, rule=_eq_norm_10))
-        elif i_td[j] == [True, True]:
-            m.add_component(f"GP{i}_x{j}", pyo.Expression(t, GPi_draws, rule=_eq_norm_11))
+    xeq = []  # x expression; not named 'x' to avoid potential variable name conflicts
+    for j in attributes:
+        if ts[j] is None:
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(rule=_eq_norm[switch[j]]))  # switch = 0
+        else:
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(ts[j], rule=_eq_norm[switch[j]]))  # switch = 1, 2, 3
+        xeq.append(m.component(f"GP{i}_x{j}"))
 
     # Define orders of polynomials, i.e., "basis" functions:
 
     n = []  # list of lists per attribute containing basis function orders used for that attribute
-    for j in GPi_attributes:
+    for j in attributes:
         orders_j = np.unique(mtx[:, j])
         n.append(orders_j[orders_j != 0].tolist())
     
     def _orders(m, j):
         return n[j]
         
-    m.add_component(f"GP{i}_orders", pyo.Set(GPi_attributes, initialize=_orders))  # orders of basis functions
-    GPi_orders = m.component(f"GP{i}_orders")
+    m.add_component(f"GP{i}_orders", pyo.Set(attributes, initialize=_orders))  # orders of basis functions
+    orders = m.component(f"GP{i}_orders")
 
     # Define polynomials, i.e., "basis" functions:
 
-    def _eq_phi(x, nm1):
-        return self.phis[nm1][0] + sum(self.phis[nm1][k] * x ** k for k in range(1, len(self.phis[nm1])))
+    def _basis(x, n):
+        """Bernoulli polynomial, i.e., 'basis' function."""
+        return self.phis[n][0] + sum(self.phis[n][k] * x ** k for k in range(1, len(self.phis[n])))
     
-    def _eq_phi_00(m, n):
-        """Basis functions; no 't', no 'draws'."""
-        return _eq_phi(m.component(f"GP{i}_x{j}"), n - 1)
+    def _eq_phi_00(m, order):
+        return _basis(xeq[j], order - 1)
 
-    def _eq_phi_01(m, draw, n):
-        """Basis functions; no 't', yes 'draws'."""
-        return _eq_phi(m.component(f"GP{i}_x{j}")[draw], n - 1)
+    def _eq_phi_01(m, s_ind, order):
+        return _basis(xeq[j][s_ind], order - 1)
     
-    def _eq_phi_10(m, t_ind, n):
-        """Basis functions; yes 't', no 'draws'."""
-        return _eq_phi(m.component(f"GP{i}_x{j}")[t_ind], n - 1)
+    def _eq_phi_10(m, t_ind, order):
+        return _basis(xeq[j][t_ind], order - 1)
     
-    def _eq_phi_11(m, t_ind, draw, n):
-        """Basis functions; yes 't', yes 'draws'."""
-        return _eq_phi(m.component(f"GP{i}_x{j}")[t_ind, draw], n - 1)
+    def _eq_phi_11(m, t_ind, s_ind, order):
+        return _basis(xeq[j][t_ind, s_ind], order - 1)
 
-    for j in GPi_attributes:
-        if i_td[j] == [False, False]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(GPi_orders[j], rule=_eq_phi_00))
-        elif i_td[j] == [False, True]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(GPi_draws, GPi_orders[j], rule=_eq_phi_01))
-        elif i_td[j] == [True, False]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(t, GPi_orders[j], rule=_eq_phi_10))
-        elif i_td[j] == [True, True]:
-            m.add_component(f"GP{i}_phi_x{j}", pyo.Expression(t, GPi_draws, GPi_orders[j], rule=_eq_phi_11))
+    _eq_phi = [_eq_phi_00, _eq_phi_01, _eq_phi_10, _eq_phi_11]
 
-    GPi_phi = list(m.component(f"GP{i}_phi_x{j}") for j in GPi_attributes)
+    phi = []
+    for j in attributes:
+        if ts[j] is None:
+            m.add_component(f"GP{i}_phi{j}", pyo.Expression(orders[j], rule=_eq_phi[switch[j]]))  # switch = 0
+        else:
+            m.add_component(f"GP{i}_phi{j}", pyo.Expression(ts[j], orders[j], rule=_eq_phi[switch[j]]))  # switch = 1, 2, 3
+        phi.append(m.component(f"GP{i}_phi{j}"))
 
-    # Build GP expression per draw:
+    # Build GP expression:
 
-    def _eq_y_0(m, draw):
-        """GP equation; no 't'."""
-        y = GPi_beta[draw, 0]  # initialize
-        
-        for term in range(1, len(GPi_terms)):  # == GPi_terms[1::]
-            y_term = GPi_beta[draw, term]
-
-            for j in GPi_attributes:
-                n = mtx[term - 1, j]
-
-                if n != 0:  # since 0 means none
-                    if i_td[j] == [False, False]:
-                        y_term *= GPi_phi[j][n]
-                    elif i_td[j] == [False, True]:
-                        y_term *= GPi_phi[j][draw, n]
-
+    def _eq_y_X1(s_ind, t_ind=None):
+        """GP expression, with 'scenarios'."""
+        y = beta[s_ind, 0]  # initialize
+        for term in range(1, len(terms)):  # == terms[1::]
+            y_term = beta[s_ind, term]
+            for j in attributes:
+                order = mtx[term - 1, j]
+                if order != 0:  # since 0 means none
+                    if switch[j] == 0:
+                        y_term *= phi[j][order]
+                    elif switch[j] == 1:
+                        y_term *= phi[j][s_ind, order]
+                    elif switch[j] == 2:
+                        y_term *= phi[j][t_ind, order]
+                    elif switch[j] == 3:
+                        y_term *= phi[j][t_ind, s_ind, order]
             y += y_term
-
         return y
 
-    def _eq_y_1(m, t_ind, draw):
-        """GP equation; yes 't'."""
-        y = GPi_beta[draw, 0]  # initialize
-        
-        for term in range(1, len(GPi_terms)):  # == GPi_terms[1::]
-            y_term = GPi_beta[draw, term]
-
-            for j in GPi_attributes:
-                n = mtx[term - 1, j]
-
-                if n != 0:  # since 0 means none
-                    if i_td[j] == [False, False]:
-                        y_term *= GPi_phi[j][n]
-                    elif i_td[j] == [False, True]:
-                        y_term *= GPi_phi[j][draw, n]
-                    elif i_td[j] == [True, False]:
-                        y_term *= GPi_phi[j][t_ind, n]
-                    elif i_td[j] == [True, True]:
-                        y_term *= GPi_phi[j][t_ind, draw, n]
-
+    def _eq_y_X0(t_ind=None):
+        """GP expression, without 'scenarios'."""
+        y = beta[0]  # initialize
+        for term in range(1, len(terms)):  # == terms[1::]
+            y_term = beta[term]
+            for j in attributes:
+                order = mtx[term - 1, j]
+                if order != 0:  # since 0 means none
+                    if switch[j] == 0:
+                        y_term *= phi[j][order]
+                    elif switch[j] == 2:
+                        y_term *= phi[j][t_ind, order]
             y += y_term
-
         return y
-        
-    if i_td[-1][0] == False:
-        m.add_component(f"GP{i}_y", pyo.Expression(GPi_draws, rule=_eq_y_0))
-    elif i_td[-1][0] == True:
-        m.add_component(f"GP{i}_y", pyo.Expression(t, GPi_draws, rule=_eq_y_1))
 
-    GPi_y = m.component(f"GP{i}_y")
+    def _eq_y_00(m):
+        return _eq_y_X0()
 
-    # Average scenarios, i.e., 'draws':
-
-    def _eq_y_avg_0(m):
-        """Average of draws, i.e., scenarios; no 't'."""
-        y_avg = 0
-        for draw in GPi_draws:
-            y_avg += GPi_y[draw]
-        y_avg *= 1 / len(GPi_draws)
-        return y_avg
-
-    def _eq_y_avg_1(m, t_ind):
-        """Average of draws, i.e., scenarios; yes 't'."""
-        y_avg = 0
-        for draw in GPi_draws:
-            y_avg += GPi_y[t_ind, draw]
-        y_avg *= 1 / len(GPi_draws)
-        return y_avg
-
-    if i_td[-1][0] == False:  # no 't'
-        m.add_component(f"GP{i}_y_avg", pyo.Expression(rule=_eq_y_avg_0))
-    elif i_td[-1][0] == True:  # yes 't'
-        m.add_component(f"GP{i}_y_avg", pyo.Expression(t, rule=_eq_y_avg_1))
-
-    GPi_y_avg = m.component(f"GP{i}_y_avg")
+    def _eq_y_01(m, s_ind):
+        return _eq_y_X1(s_ind)
     
-    # Set 'yvar' constraint:
+    def _eq_y_10(m, t_ind):
+        return _eq_y_X0(t_ind)
     
-    def _constr_yvar_00(m):
-        """Set 'yvar' equal to GP; no 't', no 'draws'."""
-        return yvar == GPi_y_avg
+    def _eq_y_11(m, t_ind, s_ind):
+        return _eq_y_X1(s_ind, t_ind)
 
-    def _constr_yvar_01(m, draw):
-        """Set 'yvar' equal to GP; no 't', yes 'draws'."""
-        return yvar[draw] == GPi_y[draw]
+    _eq_y = [_eq_y_00, _eq_y_01, _eq_y_10, _eq_y_11]
 
-    def _constr_yvar_10(m, t_ind):
-        """Set 'yvar' equal to GP; yes 't', no 'draws'."""
-        return yvar[t_ind] == GPi_y_avg[t_ind]
+    if ts[-1] is None:
+        m.add_component(f"GP{i}_y", pyo.Expression(rule=_eq_y[switch[-1]]))  # switch = 0
+    else:
+        m.add_component(f"GP{i}_y", pyo.Expression(ts[-1], rule=_eq_y[switch[-1]]))  # switch = 1, 2, 3
+    yeq = m.component(f"GP{i}_y")
 
-    def _constr_yvar_11(m, t_ind, draw):
-        """Set 'yvar' equal to GP; yes 't', yes 'draws'."""
-        return yvar[t_ind, draw] == GPi_y[t_ind, draw]
+    # Constraint of 'yvar' equal to 'm.GP#_y' Expression:
+    
+    def _constr_00(m):
+        return yvar == yeq
 
-    if i_td[-1][1] is False:  # no 'draws'
-        if i_td[-1][0] is False:  # no 't'
-            m.add_component(f"GP{i}_constr", pyo.Constraint(rule=_constr_yvar_00))
-        else:  # yes 't'
-            m.add_component(f"GP{i}_constr", pyo.Constraint(t, rule=_constr_yvar_10))
-    else:  # yes 'draws'
-        if i_td[-1][0] is False:  # no 't'
-            m.add_component(f"GP{i}_constr", pyo.Constraint(GPi_draws, rule=_constr_yvar_01))
-        else:  # yes 't'
-            m.add_component(f"GP{i}_constr", pyo.Constraint(t, GPi_draws, rule=_constr_yvar_11))
+    def _constr_01(m, s_ind):
+        return yvar[s_ind] == yeq[s_ind]
+
+    def _constr_10(m, t_ind):
+        return yvar[t_ind] == yeq[t_ind]
+
+    def _constr_11(m, t_ind, s_ind):
+        return yvar[t_ind, s_ind] == yeq[t_ind, s_ind]
+
+    _constr = [_constr_00, _constr_01, _constr_10, _constr_11]
+
+    if ts[-1] is None:
+        m.add_component(f"GP{i}", pyo.Constraint(rule=_constr[switch[-1]]))  # switch = 0
+    else:
+        m.add_component(f"GP{i}", pyo.Constraint(ts[-1], rule=_constr[switch[-1]]))  # switch = 1, 2, 3
 
     return m
-
-# RTW:
-#
-#   - LIKELY MAKE NO 'draws' YIELD 'beta_avg' PARAM, WHICH IS USED DIRECTLY IN Y_AVG GP EXPRESSION; CORRESPONDING CONSTR
-#       - ELSE, 'draws' DOES NOT YIELD 'beta_avg' NOR 'y_avg'; CONSTR INDEXED BY 'draws'
-#       - ALSO, NO 'draws' MAY SKIP 'y' EXPRESSIONS IN FAVOR OF 'y_avg' ONLY
-
-
 
