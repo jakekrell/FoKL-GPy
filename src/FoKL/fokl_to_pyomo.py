@@ -41,7 +41,7 @@ def fix_betas(m, betas, i=0, scenarios=None):
 
     else:  # then 'beta[s, term]' == 'betas[-(s + 1), term]'; i.e., most recent draws
         if scenarios is None:
-            raise ValueError("'scenarios' must be passed to 'fix_betas' if used to index 'm.GP#_beta'.")
+            raise ValueError("'scenarios' must be passed to 'fix_betas' if used to index 'm.GP#_beta'. Otherwise, ensure 'betas' aligns with 'm.GP#_beta'.")
         s_ind = 0
         for s in scenarios:
             s_ind += 1
