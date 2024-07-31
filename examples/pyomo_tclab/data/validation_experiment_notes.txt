@@ -1,0 +1,8 @@
+# Validation Experiment Notes
+
+## Validation Experiment 1
+* Input data: u_via_GP_of_resid_with_du_penalty.csv
+* Open-loop optimal control signal used Tamb of 26.731 degC
+* Output data: validation_experiment1.csv
+* Experiment Tamb was around 27.666
+* Final temperature was around 38.7 degC, which is an overshoot of 2.7 degC from the target
