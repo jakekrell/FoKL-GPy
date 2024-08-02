@@ -14,3 +14,7 @@
 * Output data: validation_experiment2.csv
 * Experiment Tamb was around 27.666
 * Final temperature was around 37.6 degC, which is an overshoot of 2.6 degC from the target
+
+## Validation Experiment 3
+* Input data: solution_averageDraws_0o5du1.csv
+
