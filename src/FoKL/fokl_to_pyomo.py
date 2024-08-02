@@ -32,7 +32,11 @@ def fix_betas(m, betas, i=0, scenarios=None):
     if betas.ndim == 1:  # format (n,) to (1,n)
         betas = betas[np.newaxis, :]
 
-    if len(beta.index_set()) == betas.shape[1]:  # then 'beta[term]' == average of 'betas'
+    _INDEX_S = False
+    if scenarios is not None:  # check this in case 'len(scenarios) == 1'
+        _INDEX_S = True
+        
+    if _INDEX_S is False and len(beta.index_set()) == betas.shape[1]:  # then 'beta[term]' == average of 'betas', assuming 'len(scenarios) != 1'
         if scenarios is not None:
             warnings.warn("Ignoring 'scenarios'.", category=UserWarning)
         beta_avg = np.mean(betas, axis=0)
@@ -42,7 +46,7 @@ def fix_betas(m, betas, i=0, scenarios=None):
     else:  # then 'beta[s, term]' == 'betas[-(s + 1), term]'; i.e., most recent draws
         if scenarios is None:
             raise ValueError("'scenarios' must be passed to 'fix_betas' if used to index 'm.GP#_beta'. Otherwise, ensure 'betas' aligns with 'm.GP#_beta'.")
-        s_ind = 0
+        s_ind = -1  # defined as separate index since 'scenarios' is not necessarily 'range(n)' but could be strings, etc.
         for s in scenarios:
             s_ind += 1
             for term in terms:
@@ -100,9 +104,9 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
     if t is None and s is None:
         ts = None  # Pyomo indices
     elif t is None:
-        ts = s
+        ts = [s]
     elif s is None:
-        ts = t
+        ts = [t]
     else:
         ts = [t, s]
     
@@ -112,12 +116,18 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
                 if ts is None:
                     xvars[j] = pyo.Var(bounds=self.minmax[j])
                 else:
-                    xvars[j] = pyo.Var(ts, bounds=self.minmax[j])
+                    if len(ts) == 1:
+                        xvars[j] = pyo.Var(ts[0], bounds=self.minmax[j])
+                    else:
+                        xvars[j] = pyo.Var(ts[0], ts[1], bounds=self.minmax[j])
         if isinstance(yvar, str):
             if ts is None:
                 yvar = pyo.Var()
             else:
-                yvar = pyo.Var(ts)
+                if len(ts) == 1:
+                    yvar = pyo.Var(ts[0])
+                else:
+                    yvar = pyo.Var(ts[0], ts[1])
     vars = xvars + [yvar]
 
     dims = 0  # number of dimensions; i.e., 1 if 't' or 'scenarios', 2 if both
@@ -157,19 +167,19 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
                     if t is None:
                         if lv != ls:
                             raise _index_error("scenarios")
-                        ts.append(s)
+                        ts.append([s])
                         switch.append(1)
                     elif s is None:
                         if lv != lt:
                             raise _index_error("t")
-                        ts.append(t)
+                        ts.append([t])
                         switch.append(2)
                 else:
                     if lv == ls:
-                        ts.append(s)
+                        ts.append([s])
                         switch.append(1)
                     elif lv == lt:
-                        ts.append(t)
+                        ts.append([t])
                         switch.append(2)
                     else:
                         raise ValueError(f"Index of 'xvars[{j}]' failed to be inferred from length because it is not equal to length of 't' nor 'scenarios'.")
@@ -191,11 +201,10 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
     terms = m.component(f"GP{i}_terms")
 
     # Define beta coefficients:
-    if s is not None:
-        sterms = [s, terms]  # index betas by scenarios
-    else:
-        sterms = terms
-    m.add_component(f"GP{i}_beta", pyo.Param(sterms, mutable=True))  # 'mutable=True', to change the values dynamically
+    if s is not None:  # index betas by scenarios and terms
+        m.add_component(f"GP{i}_beta", pyo.Param(s, terms, mutable=True))  # 'mutable=True', to change the values dynamically
+    else:  # index betas by terms only
+        m.add_component(f"GP{i}_beta", pyo.Param(terms, mutable=True))
     fix_betas(m, self.betas, i, s)
     beta = m.component(f"GP{i}_beta")
 
@@ -223,8 +232,10 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
     for j in attributes:
         if ts[j] is None:
             m.add_component(f"GP{i}_x{j}", pyo.Expression(rule=_eq_norm[switch[j]]))  # switch = 0
+        elif len(ts[j]) == 1:
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(ts[j][0], rule=_eq_norm[switch[j]]))  # switch = 1, 2
         else:
-            m.add_component(f"GP{i}_x{j}", pyo.Expression(ts[j], rule=_eq_norm[switch[j]]))  # switch = 1, 2, 3
+            m.add_component(f"GP{i}_x{j}", pyo.Expression(ts[j][0], ts[j][1], rule=_eq_norm[switch[j]]))  # switch = 3
         xeq.append(m.component(f"GP{i}_x{j}"))
 
     # Define orders of polynomials, i.e., "basis" functions:
@@ -264,8 +275,10 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
     for j in attributes:
         if ts[j] is None:
             m.add_component(f"GP{i}_phi{j}", pyo.Expression(orders[j], rule=_eq_phi[switch[j]]))  # switch = 0
+        elif len(ts[j]) == 1:
+            m.add_component(f"GP{i}_phi{j}", pyo.Expression(ts[j][0], orders[j], rule=_eq_phi[switch[j]]))  # switch = 1, 2
         else:
-            m.add_component(f"GP{i}_phi{j}", pyo.Expression(ts[j], orders[j], rule=_eq_phi[switch[j]]))  # switch = 1, 2, 3
+            m.add_component(f"GP{i}_phi{j}", pyo.Expression(ts[j][0], ts[j][1], orders[j], rule=_eq_phi[switch[j]]))  # switch = 3
         phi.append(m.component(f"GP{i}_phi{j}"))
 
     # Build GP expression:
@@ -320,8 +333,10 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
 
     if ts[-1] is None:
         m.add_component(f"GP{i}_y", pyo.Expression(rule=_eq_y[switch[-1]]))  # switch = 0
+    elif len(ts[-1]) == 1:
+        m.add_component(f"GP{i}_y", pyo.Expression(ts[-1][0], rule=_eq_y[switch[-1]]))  # switch = 1, 2
     else:
-        m.add_component(f"GP{i}_y", pyo.Expression(ts[-1], rule=_eq_y[switch[-1]]))  # switch = 1, 2, 3
+        m.add_component(f"GP{i}_y", pyo.Expression(ts[-1][0], ts[-1][1], rule=_eq_y[switch[-1]]))  # switch = 3
     yeq = m.component(f"GP{i}_y")
 
     # Constraint of 'yvar' equal to 'm.GP#_y' Expression:
@@ -342,8 +357,10 @@ def fokl_to_pyomo(self, xvars, yvar, m=None, t=None, scenarios=None):
 
     if ts[-1] is None:
         m.add_component(f"GP{i}", pyo.Constraint(rule=_constr[switch[-1]]))  # switch = 0
+    elif len(ts[-1]) == 1:
+        m.add_component(f"GP{i}", pyo.Constraint(ts[-1][0], rule=_constr[switch[-1]]))  # switch = 1, 2
     else:
-        m.add_component(f"GP{i}", pyo.Constraint(ts[-1], rule=_constr[switch[-1]]))  # switch = 1, 2, 3
+        m.add_component(f"GP{i}", pyo.Constraint(ts[-1][0], ts[-1][1], rule=_constr[switch[-1]]))  # switch = 3
 
     return m
 
