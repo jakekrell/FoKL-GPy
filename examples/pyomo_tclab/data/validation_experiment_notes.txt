@@ -18,3 +18,5 @@
 ## Validation Experiment 3
 * Input data: solution_averageDraws_0o5du1.csv
 
+## Validation Experiment 3
+* Input data: solution_benchmark_0o5du1.csv
