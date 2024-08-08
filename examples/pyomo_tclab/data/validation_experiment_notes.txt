@@ -25,3 +25,10 @@
 * Input data: tclab_final_as_of_20240807__u_benchmark.csv
 * Peak of set point changed from +35 C to +25 C
 * Ran on laptop computer (but using same TCLab hardware)
+
+
+## Validation Experiment 6
+* Input data: tclab_final_as_of_20240807__u_GP.csv
+* Peak of set point changed from +35 C to +25 C
+* Ran on laptop computer (but using same TCLab hardware)
+
