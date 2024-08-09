@@ -26,9 +26,12 @@
 * Peak of set point changed from +35 C to +25 C
 * Ran on laptop computer (but using same TCLab hardware)
 
-
 ## Validation Experiment 6
 * Input data: tclab_final_as_of_20240807__u_GP.csv
 * Peak of set point changed from +35 C to +25 C
 * Ran on laptop computer (but using same TCLab hardware)
+
+## Validation Experiment 6b
+* Input data: tclab_final_as_of_20240807__u_GP.csv (updated)
+* Repeated validation experiment 6 but with an updated input file that corrects a Pyomo model bug
 
